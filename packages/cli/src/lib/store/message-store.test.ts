@@ -85,7 +85,7 @@ describe("messages", () => {
 
 	it("neutralizes control characters but keeps line breaks in the body", () => {
 		const store = open();
-		store.addInbound(msg({ subject: "a\nb\u001b[31m", text: "l1\r\nl2\u001b[2Jx y\ttab" }));
+		store.addInbound(msg({ subject: "a\nb\u001b[31m", text: "l1\r\nl2\u001b[2Jx\u2028y\ttab" }));
 		const [stored] = store.listMessages();
 		expect(stored?.subject).toBe("a�b�[31m");
 		expect(stored?.text).toBe("l1\nl2�[2Jx�y\ttab");
@@ -230,5 +230,34 @@ describe("held senders", () => {
 		store.dismissHeld(MALLORY, "ignored");
 		expect(store.releaseHeld(MALLORY)).toBe(0);
 		expect(store.listMessages()).toHaveLength(0);
+	});
+
+	it("records a block for a sender who sent nothing and keeps their later messages out", () => {
+		const store = open();
+		store.setSenderStatus(MALLORY, "blocked");
+		expect(store.heldStatus(MALLORY)).toBe("blocked");
+		expect(store.listHeld()).toHaveLength(0);
+		expect(store.hold(MALLORY, msg({ id: "h1" }))).toBe("suppressed");
+	});
+
+	it("turns an existing held sender into a block and drops the text", () => {
+		const store = open();
+		store.hold(MALLORY, msg({ id: "h1", text: "plea" }));
+		store.setSenderStatus(MALLORY, "blocked");
+		expect(store.heldStatus(MALLORY)).toBe("blocked");
+		store.flush();
+		expect(readFileSync(join(dir, HELD_FILE), "utf8")).not.toContain("plea");
+	});
+});
+
+describe("delivery receipts", () => {
+	it("updates only the outbound message it refers to", () => {
+		const store = open();
+		store.addInbound(msg({ id: "in1" }));
+		store.addOutbound({ ...msg({ id: "out1", at: "2026-10-07T10:01:00.000Z" }), deliveryStatus: "sent" });
+		expect(store.setDeliveryStatus("in1", "delivered")).toBe(false);
+		expect(store.setDeliveryStatus("out1", "delivered")).toBe(true);
+		expect(store.setDeliveryStatus("out1", "delivered")).toBe(false);
+		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("delivered");
 	});
 });

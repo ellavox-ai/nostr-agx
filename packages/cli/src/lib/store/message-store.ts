@@ -311,6 +311,15 @@ export class MessageStore {
 		return true;
 	}
 
+	/** Record a decision about a sender who has no held messages (a block, for example). */
+	setSenderStatus(npub: string, status: "ignored" | "blocked"): void {
+		if (this.dismissHeld(npub, status)) {
+			return;
+		}
+		this.held.push({ npub, status, firstSeenAt: this.now().toISOString(), count: 0, messages: [] });
+		this.heldDirty = true;
+	}
+
 	/** Write what changed. A quiet run writes nothing. */
 	flush(): void {
 		if (this.messagesDirty) {
