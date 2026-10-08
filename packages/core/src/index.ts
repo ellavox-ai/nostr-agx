@@ -8,7 +8,7 @@
  * result). The Nostr binding lives in `@nostr-agx/nostr`.
  */
 
-export const AGX_CORE_VERSION = "0.3.1";
+export const AGX_CORE_VERSION = "0.3.2";
 
 export * from "./capability";
 export * from "./client";

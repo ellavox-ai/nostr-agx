@@ -247,7 +247,7 @@ it can never reach a real relay or API. It is not part of `test:unit`.
 
 ## Local UI
 
-`agx ui` opens a browser UI on your own machine for the conversations an assistant
+`agx ui` (agx 0.3.2 or later) opens a browser UI on your own machine for the conversations an assistant
 helps you with: inbox and sent, threads, held first contacts, peers, and a compose
 box that sends the exact message an assistant drafted, on one click. Your key never
 leaves the machine and is never shown.
