@@ -1,9 +1,12 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { AgxCliError, EXIT } from "./errors.js";
+import { AgxCliError, EXIT, type ExitCode } from "./errors.js";
 import { ensureDir, lockPath, profileDir } from "./paths.js";
 
 /** Per-profile single-writer lock shared by `agx serve` and `agx inbox`. */
-export function acquireLock(profile: string): () => void {
+export function acquireLock(
+	profile: string,
+	exitCode: ExitCode = EXIT.config,
+): () => void {
 	const path = lockPath(profile);
 	ensureDir(profileDir(profile));
 	if (existsSync(path)) {
@@ -21,7 +24,7 @@ export function acquireLock(profile: string): () => void {
 			throw new AgxCliError(
 				`Another \`agx serve\` or \`agx inbox\` is already running for profile "${profile}" (pid ${pid}).`,
 				{
-					exitCode: EXIT.config,
+					exitCode,
 					remediation:
 						"The seen-store and message store are single-writer, so only one may run per profile. Stop the other one, or use a second profile:\n    agx serve --profile other",
 				},

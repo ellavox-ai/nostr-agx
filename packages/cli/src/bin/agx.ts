@@ -44,6 +44,7 @@ import { registerCommand } from "../commands/register.js";
 import { relayCommand } from "../commands/relay.js";
 import { searchCommand } from "../commands/search.js";
 import { requestCommand, sendCommand } from "../commands/send.js";
+import { inboxCommand } from "../commands/inbox.js";
 import { serveCommand } from "../commands/serve.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { setColor, setJsonMode } from "../lib/output.js";
@@ -425,6 +426,17 @@ program
 	.option("--reset-cursor", "re-read the inbox from the beginning")
 	.option("-v, --verbose", "log transport activity")
 	.action((options) => serveCommand(withGlobals(options)));
+
+program
+	.command("inbox")
+	.description("pull new messages once and exit: never replies, never runs tasks")
+	.option("--wait <seconds>", "bound the pull (default 10)")
+	.option("--unread", "list every unread message, not only the new ones")
+	.option("--thread <contextId>", "list one thread")
+	.option("--full-ids", "print full npubs and ids")
+	.option("--summary", "counts only, no peer text (safe for a hook)")
+	.option("-v, --verbose", "log transport activity")
+	.action((options) => inboxCommand(withGlobals(options)));
 
 program
 	.command("send <peer> <message>")

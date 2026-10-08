@@ -249,6 +249,17 @@ export class MessageStore {
 		return changed;
 	}
 
+	/** Record a delivery receipt on the outbound message it refers to. */
+	setDeliveryStatus(id: string, status: string): boolean {
+		const m = this.messages.find((x) => x.id === id && x.direction === "out");
+		if (!m || m.deliveryStatus === status) {
+			return false;
+		}
+		m.deliveryStatus = status;
+		this.messagesDirty = true;
+		return true;
+	}
+
 	/** Senders waiting for a decision. */
 	listHeld(): HeldSender[] {
 		return this.held.filter((h) => h.status === "held");
