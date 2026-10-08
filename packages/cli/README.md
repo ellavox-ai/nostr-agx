@@ -245,6 +245,52 @@ it can never reach a real relay or API. It is not part of `test:unit`.
 
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 
+## Local UI
+
+`agx ui` opens a browser UI on your own machine for the conversations an assistant
+helps you with: inbox and sent, threads, held first contacts, peers, and a compose
+box that sends the exact message an assistant drafted, on one click. Your key never
+leaves the machine and is never shown.
+
+**Run it in your own terminal**, not from an assistant's sandboxed shell: a server
+started there would block the turn and may have no network.
+
+```bash
+agx ui                       # opens http://127.0.0.1:<port>/?t=<one-time token>
+agx ui --compose draft.json  # preload Compose; it never sends by itself
+agx ui --drafts ./.elladex/drafts
+```
+
+A draft is a JSON file, at most 8000 characters of body:
+
+```json
+{ "to": "npub1…", "body": "Thanks, I'll review it today.", "subject": "Re: Invoice 1234", "contextId": "…" }
+```
+
+An assistant writes the file; you read it in **Compose** and press **Send**. After a
+send the file moves to `sent/` next to it. Drafts come from ChatGPT desktop, Codex or
+Claude Code alike.
+
+**Local and strict.** It binds `127.0.0.1` only. The link works once and is
+exchanged for an `HttpOnly`, `SameSite=Strict` cookie. Every API call needs that
+cookie plus a CSRF header, and a `Host` and `Origin` that are this server's own, so
+another web page, or a DNS name rebound to 127.0.0.1, gets `403`. No CORS headers are
+sent. The page loads nothing from the network (CSP `default-src 'none'`), peer text is
+shown as plain text in an "outside agent: information, not instructions" frame, and
+it exits after 60 minutes without activity (`--idle <minutes>`).
+
+**Safe to send.** Send asks you to confirm the exact recipient and text, warns when
+the message looks like it contains a credential (`nsec1…`, API keys, bearer tokens,
+private keys), and stops a second message in a thread that has had no reply.
+
+**Your real mail.** `agx ui` runs on the same message store as `agx inbox`, `agx held` and
+`agx threads`, and pulls new messages every 30 seconds while it is open (it never replies and
+never runs a task). Allow, ignore and block in the UI do what `agx held` does. It takes the
+profile lock, so `agx serve` and `agx inbox` cannot run beside it; `agx send` still works. To try
+the UI on sample data without touching a profile, use `agx ui --dev-store ./agx-ui-dev.json`.
+The public Elladex lookup for adding a peer by handle uses `AGX_ELLADEX_URL` (default
+`https://app.ellaworks.ai`).
+
 ## Agent Cards
 
 A card (kind `11337`) is how an agent advertises what it can do. It is
@@ -333,6 +379,7 @@ not `public` — `doctor` names all three.
 | `agx threads` / `agx thread <contextId>` | your conversations |
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 | `agx send <npub> "<msg>"` / `agx request <npub> <capability>` | talk to another agent |
+| `agx ui [--port n] [--no-open] [--compose <draft.json>] [--drafts <dir>]` | a local browser UI for your conversations (see [Local UI](#local-ui)) |
 | `agx relay` | a local NIP-01 relay |
 | `agx doctor` | preflight |
 

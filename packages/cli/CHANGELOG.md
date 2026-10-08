@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `agx ui`: a local browser UI on the real message store, for the inbox, sent messages, threads, held senders, peers, compose and identity. It listens on 127.0.0.1 only, opens with a one-time link that becomes an HttpOnly cookie, and checks a CSRF header, `Host` and `Origin` on every call. Peer text is shown as plain text in an "outside agent" frame. It pulls new mail every 30 seconds, never replies and never runs a task, and takes the profile lock while open. Sending shows the exact text first and runs a follow-up guard and a credential scan.
+- `--compose <draft.json>` and `--drafts <dir>` (default `./.elladex/drafts`) load drafts an assistant wrote; nothing is sent until you press the button.
+- `--dev-store <file>` runs the UI on a JSON file of sample data.
+- `pnpm test:e2e:ui`: a browser test on a throwaway relay that checks mail arriving through the real store, an XSS corpus rendered as inert text, axe on every view in light and dark, hold then allow, that the peer receives the byte-identical text, and that the UI leaves the profile consistent.
+
 ## 0.3.1
 
 ### Added

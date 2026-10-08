@@ -1,0 +1,580 @@
+/*
+ * agx ui styles. The palette, radius and type scale follow the Ellaworks web
+ * app (tooling/tailwind/theme.css): indigo primary, cool near-white
+ * background, 12px radius, shadcn-style controls, a translucent header, and a
+ * dark theme that follows the system setting. System fonts only: this page
+ * loads nothing from the network.
+ */
+:root {
+	color-scheme: light dark;
+	--background: #fafafe;
+	--foreground: #292b35;
+	--card: #ffffff;
+	--border: #e3ebf6;
+	--input: #c7ced8;
+	--ring: #4e6df5;
+	--primary: #4259e0;
+	--primary-hover: #3447c4;
+	--primary-foreground: #f6f7f9;
+	--primary-soft: #4e6df51a;
+	--muted: #f8fafc;
+	--muted-foreground: #526077;
+	--accent: #ddddea;
+	--success: #39a561;
+	--success-soft: #10b9811a;
+	--success-text: #047857;
+	--destructive: #ef4444;
+	--destructive-soft: #f43f5e1a;
+	--destructive-text: #be123c;
+	--secondary: #292b35;
+	--secondary-foreground: #ffffff;
+	--highlight: #e5a158;
+	--highlight-soft: #e5a15822;
+	--radius: 16px;
+	--radius-md: 10px;
+	--radius-sm: 8px;
+	--shadow: 0 1px 2px #0000000d, 0 1px 3px #0000000d;
+	--shadow-lg: 0 10px 30px #00000026;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--background: #070d12;
+		--foreground: #e9eef3;
+		--card: #0d1116;
+		--border: #2b303d;
+		--input: #4c5362;
+		--ring: #5581f7;
+		--primary: #5581f7;
+		--primary-hover: #6e93fa;
+		--primary-foreground: #091521;
+		--primary-soft: #5581f726;
+		--muted: #020817;
+		--muted-foreground: #94a3b8;
+		--accent: #1e293b;
+		--success: #4ec17b;
+		--success-soft: #10b98126;
+		--success-text: #10b981;
+		--destructive: #ef4444;
+		--destructive-soft: #f43f5e26;
+		--destructive-text: #fb7185;
+		--secondary: #e9eef3;
+		--secondary-foreground: #091521;
+		--highlight: #e5a158;
+		--highlight-soft: #e5a15826;
+		--shadow: 0 1px 2px #00000066;
+		--shadow-lg: 0 10px 30px #000000aa;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	background: var(--background);
+	color: var(--foreground);
+	-webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2 {
+	margin: 0 0 4px;
+	font-size: 26px;
+	font-weight: 700;
+	letter-spacing: -0.025em;
+}
+
+.skip {
+	position: absolute;
+	left: -999px;
+}
+
+.skip:focus {
+	left: 8px;
+	top: 8px;
+	background: var(--card);
+	padding: 8px 12px;
+	border-radius: var(--radius-sm);
+	z-index: 20;
+}
+
+.sr {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- header */
+
+header.top {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	background: color-mix(in srgb, var(--card) 78%, transparent);
+	-webkit-backdrop-filter: blur(14px) saturate(1.4);
+	backdrop-filter: blur(14px) saturate(1.4);
+	border-bottom: 2px solid var(--border);
+}
+
+header.top h1 {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	max-width: 1040px;
+	margin: 0 auto;
+	padding: 14px 24px 6px;
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+
+nav {
+	display: flex;
+	flex-wrap: wrap;
+	max-width: 1040px;
+	margin: 0 auto;
+	padding: 0 14px;
+}
+
+nav button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: -2px;
+	padding: 10px 14px;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	background: transparent;
+	color: var(--muted-foreground);
+	font: inherit;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+nav button:hover {
+	color: var(--foreground);
+}
+
+nav button[aria-current="page"] {
+	border-bottom-color: var(--primary);
+	color: var(--foreground);
+	font-weight: 700;
+}
+
+.badge {
+	min-width: 18px;
+	padding: 0 5px;
+	border-radius: 9px;
+	background: var(--destructive);
+	color: #fff;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+	text-align: center;
+}
+
+/* ------------------------------------------------------------------ page */
+
+main {
+	max-width: 1040px;
+	margin: 0 auto;
+	padding: 32px 24px 64px;
+}
+
+main:focus {
+	outline: none;
+}
+
+h2 {
+	margin: 0 0 6px;
+	font-size: 24px;
+	font-weight: 700;
+}
+
+.card {
+	margin-top: 16px;
+	padding: 4px 24px 24px;
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+}
+
+h2.section {
+	margin-top: 36px;
+	font-size: 18px;
+}
+
+main > h2 + p.snippet {
+	margin: 0 0 24px;
+	font-size: 14px;
+}
+
+.toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+	margin: 16px 0;
+}
+
+.toolbar label {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	font-weight: 500;
+	color: var(--muted-foreground);
+}
+
+/* -------------------------------------------------------------- controls */
+
+input,
+textarea,
+select {
+	font: inherit;
+	color: var(--foreground);
+	background: var(--card);
+	border: 1px solid var(--input);
+	border-radius: var(--radius-md);
+	padding: 8px 12px;
+	box-shadow: var(--shadow);
+}
+
+input[type="checkbox"] {
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	accent-color: var(--primary);
+}
+
+input::placeholder,
+textarea::placeholder {
+	color: var(--muted-foreground);
+}
+
+main input[type="text"],
+main input[type="search"] {
+	width: 100%;
+	max-width: 560px;
+	height: 38px;
+}
+
+textarea {
+	width: 100%;
+	min-height: 200px;
+	resize: vertical;
+	line-height: 1.6;
+}
+
+label {
+	display: block;
+	margin: 16px 0 6px;
+	font-weight: 600;
+}
+
+:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+	border-color: var(--ring);
+	outline-offset: 0;
+}
+
+button.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 36px;
+	padding: 0 16px;
+	border: 1px solid color-mix(in srgb, var(--secondary) 15%, transparent);
+	border-radius: var(--radius-md);
+	background: transparent;
+	color: var(--secondary);
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+button.btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--secondary) 10%, transparent);
+}
+
+button.btn.primary {
+	background: var(--primary);
+	border-color: transparent;
+	color: var(--primary-foreground);
+	box-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+
+button.btn.primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--primary) 90%, transparent);
+	border-color: transparent;
+}
+
+button.btn.danger {
+	background: #dc2626;
+	border-color: transparent;
+	color: #fff;
+}
+
+button.btn.danger:hover:not(:disabled) {
+	background: #b91c1c;
+	color: #fff;
+}
+
+button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 14px;
+}
+
+/* ----------------------------------------------------------------- cards */
+
+ul.list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 12px;
+}
+
+li.row {
+	position: relative;
+	padding: 18px 20px;
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+}
+
+li.row.unread {
+	background: linear-gradient(90deg, var(--primary-soft), transparent 40%), var(--card);
+	border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+}
+
+li.row.unread::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 14px;
+	bottom: 14px;
+	width: 3px;
+	border-radius: 0 3px 3px 0;
+	background: var(--primary);
+}
+
+li.row strong {
+	font-size: 15px;
+	letter-spacing: -0.01em;
+}
+
+.meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 10px;
+	align-items: center;
+	margin-bottom: 4px;
+	color: var(--muted-foreground);
+	font-size: 12.5px;
+}
+
+.meta strong {
+	color: var(--foreground);
+	font-size: 13px;
+}
+
+.snippet {
+	margin-top: 4px;
+	color: var(--muted-foreground);
+	overflow-wrap: anywhere;
+}
+
+code.npub {
+	padding: 1px 6px;
+	border-radius: 6px;
+	background: var(--muted);
+	border: 1px solid var(--border);
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 12px;
+	color: var(--foreground);
+}
+
+.meta button.btn {
+	height: 24px;
+	padding: 0 12px;
+	border-radius: 6px;
+	font-size: 12px;
+}
+
+.chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 10px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--secondary) 6%, transparent);
+	color: var(--muted-foreground);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	line-height: 1.3;
+	text-transform: uppercase;
+}
+
+.chip.ok {
+	background: var(--success-soft);
+	color: var(--success-text);
+}
+
+.chip.warn {
+	background: var(--destructive-soft);
+	color: var(--destructive-text);
+}
+
+/* ----------------------------------------------- text from other parties */
+
+.peer-frame {
+	margin-top: 10px;
+	color: var(--muted-foreground);
+	font-size: 11.5px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+}
+
+.peer-text {
+	margin: 4px 0 0;
+	padding: 10px 14px;
+	background: var(--highlight-soft);
+	border: 1px solid color-mix(in srgb, var(--highlight) 35%, transparent);
+	border-left: 3px solid var(--highlight);
+	border-radius: var(--radius-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.you-text {
+	margin: 6px 0 0;
+	padding: 10px 14px;
+	background: var(--primary-soft);
+	border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+	border-left: 3px solid var(--primary);
+	border-radius: var(--radius-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.notice {
+	margin: 16px 0;
+	padding: 12px 16px;
+	background: var(--highlight-soft);
+	border: 1px solid color-mix(in srgb, var(--highlight) 45%, transparent);
+	border-radius: var(--radius);
+}
+
+.empty {
+	padding: 40px 0;
+	color: var(--muted-foreground);
+	text-align: center;
+}
+
+/* ---------------------------------------------------------- toast, dialog */
+
+#toast {
+	position: fixed;
+	right: 20px;
+	bottom: 20px;
+	z-index: 30;
+	max-width: 380px;
+}
+
+#toast .t {
+	margin-top: 8px;
+	padding: 12px 16px;
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	box-shadow: var(--shadow-lg);
+}
+
+#toast .t.error {
+	border-color: var(--destructive);
+}
+
+dialog {
+	width: calc(100% - 32px);
+	max-width: 620px;
+	padding: 22px 24px;
+	background: var(--card);
+	color: var(--foreground);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-lg);
+}
+
+dialog::backdrop {
+	background: #02061799;
+	-webkit-backdrop-filter: blur(3px);
+	backdrop-filter: blur(3px);
+}
+
+dialog .ask-message {
+	margin: 8px 0 16px;
+	white-space: pre-wrap;
+}
+
+dialog h2 {
+	font-size: 19px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	button.btn,
+	nav button,
+	li.row {
+		transition:
+			background-color 0.16s cubic-bezier(0.2, 0, 0, 1),
+			border-color 0.16s cubic-bezier(0.2, 0, 0, 1),
+			color 0.16s cubic-bezier(0.2, 0, 0, 1),
+			box-shadow 0.16s cubic-bezier(0.2, 0, 0, 1);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		transition: none !important;
+		animation: none !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+@media (max-width: 640px) {
+	header.top h1 {
+		padding: 12px 14px 4px;
+	}
+	nav {
+		padding: 0 6px;
+	}
+	nav button {
+		padding: 8px 10px;
+	}
+	main {
+		padding: 20px 14px 48px;
+	}
+}
