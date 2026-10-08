@@ -24,6 +24,9 @@ import type {
  */
 export const MAX_REQUEST_BYTES = 32 * 1024;
 
+/** Sends in flight, by recipient and thread. */
+const sending = new Set<string>();
+
 export interface IdentityView {
 	profile: string;
 	npub: string;
@@ -192,12 +195,20 @@ export async function handleApi(
 		if (status === "blocked" && body.confirm !== true) {
 			return fail(409, "confirm_required", "Blocking needs confirmation.");
 		}
+		// "Verified" is never taken from the client: ask the directory again and
+		// require that it names this very address.
+		const handle = str(body.handle, 200);
+		let verified = false;
+		if (body.verified === true && handle) {
+			const found = await deps.lookupAgent(handle);
+			verified = found?.verified === true && found.address === npub;
+		}
 		const record: PeerRecord = {
 			npub,
 			status: status as PeerStatus,
 			label: str(body.label, 200),
-			handle: str(body.handle, 200),
-			verified: body.verified === true,
+			handle,
+			verified,
 		};
 		store.setPeer(record);
 		return { status: 200, body: { peer: record } };
@@ -276,7 +287,13 @@ async function handleSend(deps: ApiDeps, body: unknown): Promise<ApiResult> {
 		return fail(400, "bad_recipient", "The recipient is not a valid npub.");
 	}
 	// The user confirmed the exact text shown in the dialog; refuse anything else.
-	if (body.confirmedText !== text || body.confirmedTo !== to) {
+	let confirmedTo: string | null = null;
+	try {
+		confirmedTo = deps.toNpub(String(body.confirmedTo ?? ""));
+	} catch {
+		confirmedTo = null;
+	}
+	if (body.confirmedText !== text || confirmedTo !== to) {
 		return fail(409, "confirm_required", "Confirm the exact recipient and text first.");
 	}
 	const peerStatus = deps.store.peerStatus(to);
@@ -302,7 +319,18 @@ async function handleSend(deps: ApiDeps, body: unknown): Promise<ApiResult> {
 		return fail(422, "secrets_found", "The message looks like it contains a credential.", { findings });
 	}
 
-	const result = await deps.send({ to, subject, contextId, body: text });
+	// One send at a time per thread: a double click must not publish twice.
+	const flightKey = `${to}|${contextId ?? ""}`;
+	if (sending.has(flightKey)) {
+		return fail(409, "send_in_progress", "This message is already being sent.");
+	}
+	sending.add(flightKey);
+	let result: Awaited<ReturnType<ApiDeps["send"]>>;
+	try {
+		result = await deps.send({ to, subject, contextId, body: text });
+	} finally {
+		sending.delete(flightKey);
+	}
 	if (!result.ok) {
 		return fail(502, "send_failed", result.detail ?? "No relay accepted the message.");
 	}

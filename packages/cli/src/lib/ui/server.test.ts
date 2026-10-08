@@ -8,6 +8,7 @@ import { createDevStore } from "./dev-store.js";
 import { startUiServer, type UiServer } from "./server.js";
 
 const ALICE = "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz";
+const ALICE_HEX = "a".repeat(64);
 const STRANGER = "npub1dzxn4hg6j2c2q8s6ma2yt6p9ncqq27lav60fpk3dygz7pzf6stgsx2z7a4";
 const SELF = "npub1q9dw0jxd2fjn7r5tp3l40x2uk5hnvg8a6c9z4e7y3wsm0kltp8aqg2nc4d";
 
@@ -15,6 +16,7 @@ let ui: UiServer;
 let store: ReturnType<typeof createDevStore>;
 let sent: SendRequest[];
 let draftsDir: string;
+let sendGate: Promise<void> | null = null;
 
 beforeEach(async () => {
 	store = createDevStore(null);
@@ -26,11 +28,15 @@ beforeEach(async () => {
 		composeDraft: null,
 		identity: () => ({ profile: "default", npub: SELF, relays: ["wss://relay.elladex.ai"], doctor: { status: "unknown", detail: null } }),
 		send: async (message) => {
+			await sendGate;
 			sent.push(message);
 			return { ok: true, detail: null };
 		},
 		lookupAgent: async (query) => (query === "alice@example.com" ? { address: ALICE, handle: query, verified: true, displayName: "Alice", summary: null } : null),
 		toNpub: (input) => {
+			if (input === ALICE_HEX) {
+				return ALICE;
+			}
 			if (!/^npub1[02-9ac-hj-np-z]{20,100}$/.test(input)) {
 				throw new Error("bad");
 			}
@@ -45,6 +51,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	sendGate = null;
 	await ui.close();
 	rmSync(draftsDir, { recursive: true, force: true });
 });
@@ -199,6 +206,18 @@ describe("API", () => {
 	});
 });
 
+describe("peers: the verified badge", () => {
+	it("is decided by the directory, not by the client", async () => {
+		const client = await connect();
+		const claimed = await client.call("POST", "/api/peers", { npub: STRANGER, status: "allowed", handle: "alice@example.com", verified: true });
+		expect(claimed.body.peer.verified).toBe(false);
+		const genuine = await client.call("POST", "/api/peers", { npub: ALICE, status: "allowed", handle: "alice@example.com", verified: true });
+		expect(genuine.body.peer.verified).toBe(true);
+		const noHandle = await client.call("POST", "/api/peers", { npub: ALICE, status: "allowed", verified: true });
+		expect(noHandle.body.peer.verified).toBe(false);
+	});
+});
+
 describe("sending", () => {
 	const body = "Thanks! Sending the PDF now.\n- line two\nüñí";
 
@@ -218,6 +237,40 @@ describe("sending", () => {
 		const result = await client.call("POST", "/api/send", { to: ALICE, body, confirmedText: `${body} (edited)`, confirmedTo: ALICE });
 		expect(result.status).toBe(409);
 		expect(sent).toEqual([]);
+	});
+
+	it("accepts the recipient as a hex key: the confirmed recipient is compared after normalising", async () => {
+		const client = await connect();
+		const body = "Hello via hex";
+		const result = await client.call("POST", "/api/send", { to: ALICE_HEX, body, confirmedText: body, confirmedTo: ALICE_HEX });
+		expect(result.status).toBe(200);
+		expect(sent[0]?.to).toBe(ALICE);
+	});
+
+	it("refuses a confirmed recipient that is not the recipient", async () => {
+		const client = await connect();
+		const body = "Hello";
+		const result = await client.call("POST", "/api/send", { to: ALICE, body, confirmedText: body, confirmedTo: STRANGER });
+		expect(result.status).toBe(409);
+		expect(sent).toHaveLength(0);
+	});
+
+	it("does not publish twice when the same send is pressed again while it is in flight", async () => {
+		const client = await connect();
+		let release: () => void = () => undefined;
+		sendGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const body = "Once only";
+		const payload = { to: ALICE, contextId: "ctx-flight", body, confirmedText: body, confirmedTo: ALICE, allowFollowUp: true };
+		const first = client.call("POST", "/api/send", payload);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		const second = await client.call("POST", "/api/send", payload);
+		expect(second.status).toBe(409);
+		expect(second.body.error.code).toBe("send_in_progress");
+		release();
+		expect((await first).status).toBe(200);
+		expect(sent).toHaveLength(1);
 	});
 
 	it("never sends to a blocked peer", async () => {

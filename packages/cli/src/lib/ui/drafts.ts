@@ -1,10 +1,12 @@
 import {
+	closeSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
-	readFileSync,
+	readSync,
 	renameSync,
-	statSync,
 } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { z } from "zod";
@@ -54,12 +56,32 @@ export function isSafeDraftName(name: string): boolean {
 	return /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.json$/.test(name);
 }
 
+const MAX_DRAFT_BYTES = 64 * 1024;
+const MAX_LISTED_DRAFTS = 200;
+
+/**
+ * Read a draft. Only a regular file is read: a FIFO or a device in the folder would block
+ * the whole UI (its size reads as 0), and a symlink could point anywhere.
+ */
 export function loadDraftFile(path: string): Draft {
-	const size = statSync(path).size;
-	if (size > 64 * 1024) {
+	const info = lstatSync(path);
+	if (!info.isFile()) {
+		throw new Error("The draft is not a regular file.");
+	}
+	if (info.size > MAX_DRAFT_BYTES) {
 		throw new Error("The draft file is larger than 64 KiB.");
 	}
-	return parseDraft(readFileSync(path, "utf8"));
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.alloc(MAX_DRAFT_BYTES + 1);
+		const read = readSync(fd, buffer, 0, buffer.length, 0);
+		if (read > MAX_DRAFT_BYTES) {
+			throw new Error("The draft file is larger than 64 KiB.");
+		}
+		return parseDraft(buffer.toString("utf8", 0, read));
+	} finally {
+		closeSync(fd);
+	}
 }
 
 export function listDrafts(dir: string): DraftEntry[] {
@@ -69,6 +91,7 @@ export function listDrafts(dir: string): DraftEntry[] {
 	return readdirSync(dir)
 		.filter((name) => isSafeDraftName(name))
 		.sort()
+		.slice(0, MAX_LISTED_DRAFTS)
 		.map((name) => {
 			try {
 				return { name, draft: loadDraftFile(join(dir, name)), error: null };

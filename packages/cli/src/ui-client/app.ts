@@ -486,7 +486,7 @@ async function viewPeers(main: HTMLElement): Promise<void> {
 				h(
 					"div",
 					{ class: "row" },
-					h("div", { class: "meta" }, h("strong", {}, agent.displayName ?? agent.handle ?? "Agent"), agent.verified ? h("span", { class: "chip ok" }, "domain-verified") : h("span", { class: "chip" }, "unverified"), npubView(agent.address)),
+					h("div", { class: "meta" }, h("strong", {}, agent.displayName ?? agent.handle ?? "Agent"), agent.verified ? h("span", { class: "chip ok" }, "domain-verified") : h("span", { class: "chip" }, "unverified"), npubView(agent.address), h("div", { class: "snippet" }, "Full address: ", h("code", { class: "npub" }, agent.address))),
 					h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => void add("allowed", agent.address, agent.handle, agent.verified) }, "Allow this peer")),
 				),
 			);
@@ -533,7 +533,8 @@ async function viewCompose(main: HTMLElement): Promise<void> {
 	}
 	const warning = h("div", { "aria-live": "polite" });
 	const status = h("div", { class: "snippet", "aria-live": "polite" });
-	const toInput = h("input", { id: "to", type: "text", value: compose.to, placeholder: "npub1… or 64-character hex key", maxlength: 200, autocomplete: "off", oninput: (e) => { compose.to = (e.target as HTMLInputElement).value; } }) as HTMLInputElement;
+	const startTo = compose.to;
+	const toInput = h("input", { id: "to", type: "text", value: compose.to, placeholder: "npub1… or 64-character hex key", maxlength: 200, autocomplete: "off", oninput: (e) => { compose.to = (e.target as HTMLInputElement).value; if (compose.contextId && compose.to.trim() !== startTo.trim()) { compose.contextId = null; status.textContent = "The recipient changed, so this starts a new thread. First contact: they must accept you before they see it."; } } }) as HTMLInputElement;
 	const subjectInput = h("input", { id: "subject", type: "text", value: compose.subject, maxlength: 500, oninput: (e) => { compose.subject = (e.target as HTMLInputElement).value; } }) as HTMLInputElement;
 	const bodyInput = h("textarea", { id: "body", value: compose.body, maxlength: 8000, rows: 10, oninput: (e) => { compose.body = (e.target as HTMLTextAreaElement).value; void scan(); } }) as HTMLTextAreaElement;
 	let scanTimer: number | undefined;
@@ -578,6 +579,7 @@ async function viewCompose(main: HTMLElement): Promise<void> {
 			h("h2", { id: "confirm-title" }, "Send this exact message?"),
 			h("p", {}, "To: ", h("code", { class: "npub" }, compose.to.trim())),
 			compose.subject ? h("p", {}, "Subject: ", compose.subject) : null,
+			h("p", {}, compose.contextId ? h("span", {}, "Thread: ", h("code", { class: "npub" }, compose.contextId)) : "New thread"),
 			h("div", { class: "you-text" }, compose.body),
 			h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => { confirmDialog.close(); void send(); } }, "Send"), h("button", { class: "btn", type: "button", onclick: () => confirmDialog.close() }, "Cancel")),
 		);

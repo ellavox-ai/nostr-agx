@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -69,5 +70,42 @@ describe("draft files", () => {
 		expect(existsSync(join(dir, "ok.json"))).toBe(false);
 		expect(readdirSync(join(dir, "sent")).length).toBe(1);
 		mkdirSync(join(dir, "again"));
+	});
+});
+
+describe("files that are not plain drafts", () => {
+	const good = JSON.stringify({ to: NPUB, body: "hi" });
+
+	it("lists a symlink as an error instead of following it", () => {
+		writeFileSync(join(dir, "real.json"), good);
+		symlinkSync(join(dir, "real.json"), join(dir, "link.json"));
+		const link = listDrafts(dir).find((d) => d.name === "link.json");
+		expect(link?.draft).toBeNull();
+		expect(link?.error).toContain("not a regular file");
+		expect(listDrafts(dir).find((d) => d.name === "real.json")?.draft).not.toBeNull();
+	});
+
+	it("does not block on a FIFO, whose size reads as 0", () => {
+		try {
+			execFileSync("mkfifo", [join(dir, "pipe.json")]);
+		} catch {
+			return; // no mkfifo here (Windows): nothing to test
+		}
+		const started = Date.now();
+		const pipe = listDrafts(dir).find((d) => d.name === "pipe.json");
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(pipe?.error).toContain("not a regular file");
+	});
+
+	it("rejects a file over 64 KiB", () => {
+		writeFileSync(join(dir, "big.json"), `{"to":"${NPUB}","body":"${"x".repeat(70_000)}"}`);
+		expect(listDrafts(dir)[0]?.error).toContain("64 KiB");
+	});
+
+	it("lists at most 200 drafts", () => {
+		for (let i = 0; i < 230; i += 1) {
+			writeFileSync(join(dir, `d${String(i).padStart(3, "0")}.json`), good);
+		}
+		expect(listDrafts(dir)).toHaveLength(200);
 	});
 });
