@@ -327,14 +327,19 @@ export class MessageStore {
 		return changed;
 	}
 
-	/** Record a delivery receipt on the outbound message it refers to. */
-	setDeliveryStatus(id: string, status: string): boolean {
-		const m = this.messages.find((x) => x.id === id && x.direction === "out");
-		if (!m || m.deliveryStatus === status) {
+	/**
+	 * Record a delivery receipt on the outbound message it refers to, but only when it
+	 * came from the peer that message was sent to. Returns whether the receipt matched.
+	 */
+	setDeliveryStatus(id: string, status: string, from: string): boolean {
+		const m = this.messages.find((x) => x.id === id && x.direction === "out" && x.peer === from);
+		if (!m) {
 			return false;
 		}
-		m.deliveryStatus = status;
-		this.messagesDirty = true;
+		if (m.deliveryStatus !== status) {
+			m.deliveryStatus = status;
+			this.messagesDirty = true;
+		}
 		return true;
 	}
 

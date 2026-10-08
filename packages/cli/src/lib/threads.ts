@@ -39,28 +39,24 @@ export function threadRows(threads: ThreadSummary[], fullIds: boolean): string[]
 	]);
 }
 
-/** A thread as `serve` prints it: RECV for what arrived, SENT for what went out. */
-export function renderThreadLines(report: ThreadReport, fullIds: boolean): string[] {
-	const lines: string[] = [];
-	for (const m of report.messages) {
-		lines.push("");
-		if (m.direction === "in") {
-			lines.push(
-				...renderInboundLines({
-					fromNpub: m.peer,
-					allowed: true,
-					subject: m.subject,
-					contextId: m.contextId,
-					text: m.text,
-					allowedOnly: false,
-					fullIds,
-				}),
-			);
-			continue;
-		}
-		const to = fullIds ? m.peer : shortNpub(m.peer);
-		lines.push(`SENT  to ${to}  ${m.deliveryStatus ?? ""}`.trimEnd());
-		lines.push(...bodyLines(m.text));
+/** One message as `serve` prints it: RECV for what arrived, SENT for what went out. */
+export function renderMessageLines(m: StoredMessage, fullIds: boolean): string[] {
+	if (m.direction === "in") {
+		return renderInboundLines({
+			fromNpub: m.peer,
+			allowed: true,
+			subject: m.subject,
+			contextId: m.contextId,
+			text: m.text,
+			allowedOnly: false,
+			fullIds,
+		});
 	}
-	return lines;
+	const to = fullIds ? m.peer : shortNpub(m.peer);
+	return [`SENT  to ${to}  ${m.deliveryStatus ?? ""}`.trimEnd(), ...bodyLines(m.text)];
+}
+
+/** A thread as `serve` prints it. */
+export function renderThreadLines(report: ThreadReport, fullIds: boolean): string[] {
+	return report.messages.flatMap((m) => ["", ...renderMessageLines(m, fullIds)]);
 }

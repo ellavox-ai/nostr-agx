@@ -1,10 +1,12 @@
 import type { AgxIncomingMessage, AgxIncomingReceipt } from "@nostr-agx/core";
 import kleur from "kleur";
-import { neutralizeControls, renderInboundLines } from "./inbound-lines.js";
+import { MAX_WRAP_BACKDATE_SEC } from "@nostr-agx/nostr";
+import { neutralizeControls } from "./inbound-lines.js";
 import { shortNpub } from "./output.js";
 import { toDisplayNpub } from "./peer.js";
 import type { MessageStore } from "./store/message-store.js";
 import type { StoredMessage } from "./store/types.js";
+import { renderMessageLines } from "./threads.js";
 
 export const INBOX_SCHEMA = "agx.inbox/1";
 export const INBOX_SUMMARY_SCHEMA = "agx.inbox.summary/1";
@@ -48,17 +50,31 @@ export interface InboxSummary {
 	relays: { ok: number; unreachable: number };
 }
 
-function isoFromSeconds(seconds: number): string {
-	return new Date(seconds * 1000).toISOString();
+/** ISO time for a unix-seconds value, or `fallback` when the value is not a time `Date` can hold. */
+function isoFromSeconds(seconds: number, fallback: Date): string {
+	const date = new Date(seconds * 1000);
+	return Number.isNaN(date.getTime()) ? fallback.toISOString() : date.toISOString();
 }
 
-/** The time to show: the sender's own claim when it is not in the future. */
+/** Slack for clock differences between sender and receiver. */
+const CLOCK_SKEW_SEC = 120;
+
+/**
+ * The time to show. The sender's own claim is used only when it is a plausible
+ * send time: the wrap is backdated by at most `MAX_WRAP_BACKDATE_SEC`, so the real
+ * time lies shortly after the wrap's time and never in the future. Anything else
+ * (a far-past or far-future claim) would reorder history or break the date, so the
+ * transport time is used.
+ */
 function messageTime(msg: AgxIncomingMessage, now: Date): string {
 	const claimed = msg.sentAt;
-	if (claimed !== undefined && claimed * 1000 <= now.getTime()) {
-		return isoFromSeconds(claimed);
-	}
-	return isoFromSeconds(msg.createdAt);
+	const nowSec = Math.floor(now.getTime() / 1000);
+	const plausible =
+		claimed !== undefined &&
+		Number.isInteger(claimed) &&
+		claimed >= msg.createdAt - CLOCK_SKEW_SEC &&
+		claimed <= Math.min(nowSec + CLOCK_SKEW_SEC, msg.createdAt + MAX_WRAP_BACKDATE_SEC + CLOCK_SKEW_SEC);
+	return isoFromSeconds(plausible ? claimed : msg.createdAt, now);
 }
 
 /**
@@ -70,45 +86,64 @@ export function createCollector(options: {
 	/** Hex pubkeys on the profile allowlist. */
 	allowed: ReadonlySet<string>;
 	now?: () => Date;
+	/** Called when a message could not be stored; the error is then rethrown so the core retries it. */
+	onError?: (error: unknown, msg: AgxIncomingMessage) => void;
 }) {
 	const now = options.now ?? (() => new Date());
 	const stored: StoredMessage[] = [];
 	const heldNow = new Set<string>();
 	const receipts: InboxReceipt[] = [];
 
+	function sort(msg: AgxIncomingMessage): void {
+		const peer = toDisplayNpub(msg.from);
+		const input = {
+			id: msg.eventId,
+			peer,
+			subject: msg.subject ?? null,
+			contextId: msg.contextId ?? null,
+			text: msg.text,
+			at: messageTime(msg, now()),
+		};
+		if (options.allowed.has(msg.from)) {
+			if (options.store.addInbound(input)) {
+				const saved = options.store.listMessages().find((m) => m.id === msg.eventId);
+				if (saved) {
+					stored.push(saved);
+				}
+			}
+			return;
+		}
+		const result = options.store.hold(peer, input);
+		if (result === "kept" || result === "capped") {
+			heldNow.add(peer);
+		}
+	}
+
 	return {
 		onMessage(msg: AgxIncomingMessage): void {
-			const peer = toDisplayNpub(msg.from);
-			const input = {
-				id: msg.eventId,
-				peer,
-				subject: msg.subject ?? null,
-				contextId: msg.contextId ?? null,
-				text: msg.text,
-				at: messageTime(msg, now()),
-			};
-			if (options.allowed.has(msg.from)) {
-				if (options.store.addInbound(input)) {
-					const saved = options.store.listMessages().find((m) => m.id === msg.eventId);
-					if (saved) {
-						stored.push(saved);
-					}
-				}
-				return;
-			}
-			const result = options.store.hold(peer, input);
-			if (result === "kept" || result === "capped") {
-				heldNow.add(peer);
+			try {
+				sort(msg);
+			} catch (error) {
+				options.onError?.(error, msg);
+				throw error;
 			}
 		},
+		/**
+		 * A receipt counts only from the peer the message was sent to (anyone who knows an
+		 * event id could otherwise mark it delivered), or from an allowed sender.
+		 */
 		onReceipt(receipt: AgxIncomingReceipt): void {
+			const from = toDisplayNpub(receipt.from);
 			const ref = receipt.receipt.refEventId;
-			options.store.setDeliveryStatus(ref, receipt.receipt.status);
+			const matched = options.store.setDeliveryStatus(ref, receipt.receipt.status, from);
+			if (!matched && !options.allowed.has(receipt.from)) {
+				return;
+			}
 			receipts.push({
-				from: toDisplayNpub(receipt.from),
+				from,
 				ref,
 				status: receipt.receipt.status,
-				at: isoFromSeconds(receipt.createdAt),
+				at: isoFromSeconds(receipt.createdAt, now()),
 			});
 		},
 		/** Messages stored by this run, oldest first. */
@@ -160,17 +195,7 @@ export function renderInboxLines(
 	const lines: string[] = [];
 	for (const m of report.messages) {
 		lines.push("");
-		lines.push(
-			...renderInboundLines({
-				fromNpub: m.peer,
-				allowed: true,
-				subject: m.subject,
-				contextId: m.contextId,
-				text: m.text,
-				allowedOnly: false,
-				fullIds: options.fullIds,
-			}),
-		);
+		lines.push(...renderMessageLines(m, options.fullIds));
 	}
 	for (const h of report.held) {
 		if (!options.heldNow.has(h.from)) {

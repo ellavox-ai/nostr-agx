@@ -252,13 +252,14 @@ describe("held senders", () => {
 });
 
 describe("delivery receipts", () => {
-	it("updates only the outbound message it refers to", () => {
+	it("updates only the outbound message it refers to, and only from the peer it went to", () => {
 		const store = open();
 		store.addInbound(msg({ id: "in1" }));
 		store.addOutbound({ ...msg({ id: "out1", at: "2026-10-07T10:01:00.000Z" }), deliveryStatus: "sent" });
-		expect(store.setDeliveryStatus("in1", "delivered")).toBe(false);
-		expect(store.setDeliveryStatus("out1", "delivered")).toBe(true);
-		expect(store.setDeliveryStatus("out1", "delivered")).toBe(false);
+		expect(store.setDeliveryStatus("in1", "delivered", BOB)).toBe(false);
+		expect(store.setDeliveryStatus("out1", "delivered", MALLORY)).toBe(false);
+		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("sent");
+		expect(store.setDeliveryStatus("out1", "delivered", BOB)).toBe(true);
 		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("delivered");
 	});
 });
