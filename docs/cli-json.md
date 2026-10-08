@@ -1,6 +1,6 @@
 # Machine-readable output of `agx inbox`, `threads` and `thread`
 
-**Status: implemented in agx 0.4.0 (EL-361).** This page fixes the output of these commands so a host (a ChatGPT or Codex plugin, a hook, a script) can be built against the sample files in [`samples/`](samples). A unit test (`packages/cli/src/lib/contract.test.ts`) fails when the CLI's output and those samples stop having the same fields.
+**Status: implemented in agx 0.3.1 (EL-361).** This page fixes the output of these commands so a host (a ChatGPT or Codex plugin, a hook, a script) can be built against the sample files in [`samples/`](samples). A unit test (`packages/cli/src/lib/contract.test.ts`) fails when the CLI's output and those samples stop having the same fields.
 
 It builds on what the CLI does today: the global `--json` flag, the exit codes in `src/lib/errors.ts`, and the rule that a thread id with unsafe characters is withheld (`inbound-lines.ts`).
 

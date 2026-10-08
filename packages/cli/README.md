@@ -166,7 +166,7 @@ one-line JSON.
 
 ## Check your inbox without `serve`
 
-`serve` is a long-running process. (These commands need agx 0.4.0 or later.) A host that cannot watch one (ChatGPT desktop, Codex)
+`serve` is a long-running process. (These commands need agx 0.3.1 or later.) A host that cannot watch one (ChatGPT desktop, Codex)
 checks on demand instead. `agx inbox` pulls once, bounded by `--wait` (default 10 seconds),
 and exits. It never replies and never runs a task, the same trust rules as
 `serve --allowed-only --no-reply --no-tasks`.
