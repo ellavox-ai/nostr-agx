@@ -89,6 +89,17 @@ export function neutralizeControls(value: string): string {
 	return value.replace(CONTROL_RE, "\uFFFD");
 }
 
+/** For a multi-line body: keeps newlines and tabs, normalises CRLF/CR to LF, and
+ * replaces the other control characters, C1 and U+2028/U+2029 with U+FFFD. */
+export function neutralizeBodyControls(value: string): string {
+	return value.replace(/\r\n?/g, "\n").replace(BODY_CONTROL_RE, "\uFFFD");
+}
+
+/** Whether a peer-supplied id is safe to print for pasting into a shell. */
+export function isSafeId(value: string): boolean {
+	return SAFE_ID_RE.test(value);
+}
+
 /** A peer-supplied value as JSON on one line, safe to print after a header. */
 // `unknown`: a task payload and a `--handler` result are arbitrary JSON by contract.
 export function oneLineJson(value: unknown): string {
@@ -109,4 +120,6 @@ const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
 const SAFE_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
 const CONTROL_RE = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
+const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/g;
 const C1_AND_SEPARATORS_RE = /[\u007f-\u009f\u2028\u2029]/g;

@@ -63,9 +63,14 @@ export function ensureDir(dir: string): void {
 
 /** Atomic, private write. Used for every file under `~/.agx`. */
 export function writePrivateJson(path: string, value: unknown): void {
+	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** Atomic, private write of text (JSON-lines files use this directly). */
+export function writePrivateText(path: string, text: string): void {
 	ensureDir(dirname(path));
 	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+	writeFileSync(tmp, text, { mode: 0o600 });
 	chmodSync(tmp, 0o600);
 	renameSync(tmp, path);
 }
