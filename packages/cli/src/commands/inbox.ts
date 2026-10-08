@@ -87,10 +87,13 @@ export async function inboxCommand(options: InboxOptions): Promise<void> {
 
 		let truncated = false;
 		let cursor = state.cursor;
+		let deadline: NodeJS.Timeout | undefined;
 		try {
 			const outcome = await Promise.race([
 				client.pump().then((result) => ({ result })),
-				new Promise<{ result: null }>((done) => setTimeout(() => done({ result: null }), waitSec * 1000)),
+				new Promise<{ result: null }>((done) => {
+					deadline = setTimeout(() => done({ result: null }), waitSec * 1000);
+				}),
 			]);
 			if (outcome.result?.complete) {
 				cursor = outcome.result.cursor;
@@ -98,6 +101,8 @@ export async function inboxCommand(options: InboxOptions): Promise<void> {
 				truncated = true;
 			}
 		} finally {
+			// A pending timer would keep the process alive for the whole --wait after the pull is done.
+			clearTimeout(deadline);
 			await client.stop().catch(() => undefined);
 		}
 
