@@ -3,7 +3,9 @@ import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
 import { fail, info, json, kv, ok, say, warn } from "../lib/output.js";
+import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { MessageStore } from "../lib/store/message-store.js";
 import { createTransport, makeLogger } from "../lib/transport.js";
 
 export interface SendOptions {
@@ -84,6 +86,7 @@ export async function sendCommand(
 		);
 	}
 
+	recordSent(profileName, toDisplayNpub(to), message, options.subject ?? null, res.contextId ?? null, res.eventId);
 	ok(`Sent to ${toDisplayNpub(to)}`);
 	kv("event", res.eventId);
 	kv("contextId", res.contextId);
@@ -114,6 +117,30 @@ export async function sendCommand(
 		total: res.total,
 		rejected: res.rejected ?? [],
 	});
+}
+
+/** Keep the sent message in the local history. A failure here must not fail a send that went out. */
+function recordSent(
+	profileName: string,
+	peer: string,
+	text: string,
+	subject: string | null,
+	contextId: string | null,
+	eventId: string,
+): void {
+	try {
+		MessageStore.spoolOutbound(profileDir(profileName), {
+			id: eventId,
+			peer,
+			subject,
+			contextId,
+			text,
+			at: new Date().toISOString(),
+			deliveryStatus: "sent",
+		});
+	} catch (error) {
+		warn(`Sent, but could not record it in your history: ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 export interface RequestOptions extends SendOptions {

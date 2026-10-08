@@ -116,13 +116,13 @@ change that for a reader that acts on the output:
 
 | flag | effect |
 |---|---|
-| `--allowed-only` | a sender off the allowlist (profile + session `--allow`) prints **one** line — `HOLD  from <npub> — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow <npub> (then ask them to resend)` — with no subject, body or context id. Allowed senders print exactly as before. |
+| `--allowed-only` | a sender off the allowlist (profile + session `--allow`) prints **one** line — `HOLD  from <npub> — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow <npub> (or: agx held ignore | agx held block)` — with no subject, body or context id. Allowed senders print exactly as before. |
 | `--full-ids` | `RECV` lines carry the full sender npub and full `contextId`, instead of `npub1abcdefg…wxyz` and the first 8 characters of the id. A `contextId` with characters outside `A-Z a-z 0-9 . _ : -` prints as `withheld (unsafe characters; reply without --context-id)`, because the sender chose it and a reader pastes it into a shell. |
 
-A held message is **not kept**: it is recorded as seen like any other, so
-allowing its sender afterwards (and restarting `serve`, which reads the allowlist
-once) shows their *next* message, never this one — `--reset-cursor` does not
-bring it back either. Ask the sender to resend once they are allowed.
+A held message is **kept** in the local store, not printed: `serve` never shows its text.
+Read and decide with `agx held list`, then `agx held allow <npub>` (releases the text into
+your inbox), `agx held ignore <npub>` or `agx held block <npub>`. A running `serve` reads
+the allowlist once, so restart it after allowing a sender.
 
 `--allowed-only` changes **printing only**. A held message is still counted and
 recorded as seen, `--reply-any` still auto-replies to it, and `--allow-all` still
@@ -176,7 +176,7 @@ agx serve --no-reply --no-tasks --allowed-only --full-ids --no-color
 #   RECV  from npub1peer…(full)  subject "Invoice 1234"  ctx 2bc8c14c9873c9fea764882abcee9fbd
 #          Hi, can you review invoice 1234?
 #          (--no-reply: observing only)
-#   HOLD  from npub1other…(full) — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow npub1other… (then ask them to resend)
+#   HOLD  from npub1other…(full) — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow npub1other… (or: agx held ignore | agx held block)
 #          (--no-reply: observing only)
 
 agx send --context-id 2bc8c14c9873c9fea764882abcee9fbd -- npub1peer…(full) "Reviewed — approved."

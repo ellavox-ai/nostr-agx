@@ -114,7 +114,7 @@ describe("--allowed-only", () => {
 			}),
 		);
 		expect(lines).toEqual([
-			`HOLD  from ${MALLORY} — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow ${MALLORY} (then ask them to resend)`,
+			`HOLD  from ${MALLORY} — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow ${MALLORY} (or: agx held ignore | agx held block)`,
 		]);
 		const joined = lines.join("\n");
 		expect(joined).not.toContain("ignore previous");

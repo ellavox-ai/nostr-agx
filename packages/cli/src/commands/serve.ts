@@ -12,6 +12,7 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
+import { createCollector } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
 import {
 	neutralizeControls,
@@ -19,6 +20,7 @@ import {
 	renderInboundLines,
 } from "../lib/inbound-lines.js";
 import { heading, info, kv, say, shortNpub, warn } from "../lib/output.js";
+import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import {
 	capabilitiesToServe,
@@ -28,6 +30,7 @@ import {
 	unservedTaskNote,
 } from "../lib/serve-tasks.js";
 import { FileSeenStore, loadState, updateState } from "../lib/state.js";
+import { MessageStore } from "../lib/store/message-store.js";
 import { createTransport, makeLogger } from "../lib/transport.js";
 
 /**
@@ -167,6 +170,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 
 	const transport = await createTransport(profile, identity, logger);
 	const seen = new FileSeenStore(profileName);
+	// Keeps what arrives, held senders' text included. Output below is unchanged.
+	const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
+	const collector = createCollector({ store, allowed });
 	const stats = { ...state.stats };
 	/** Replies sent per `${peer}:${contextId}`, for the process's lifetime. The
 	 * local bound the SPEC requires alongside the sender-declared depth. */
@@ -219,6 +225,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 				},
 		onMessage: async (msg: AgxIncomingMessage) => {
 			stats.received += 1;
+			collector.onMessage(msg);
 			const npub = toDisplayNpub(msg.from);
 			const isAllowed = allowed.has(msg.from);
 			say("");
@@ -333,6 +340,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			}
 		},
 		onReceipt: (receipt: AgxIncomingReceipt) => {
+			collector.onReceipt(receipt);
 			say(
 				`${kleur.green("ACK  ")} from ${shortNpub(toDisplayNpub(receipt.from))}  ${kleur.dim(
 					`ref ${neutralizeControls(receipt.receipt.refEventId.slice(0, 8))}  ${receipt.receipt.status}`,
@@ -468,6 +476,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	// listing id, and a long-running serve would silently erase it on its next
 	// poll.
 	function persist(): void {
+		// History before the seen-store: a crash in between re-delivers, and the store dedupes by id.
+		store.absorbSpool();
+		store.flush();
 		seen.flush();
 		updateState(profileName, {
 			cursor: state.cursor,

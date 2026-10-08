@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { isSafeId, neutralizeBodyControls, neutralizeControls } from "../inbound-lines.js";
-import { writePrivateText } from "../paths.js";
+import { ensureDir, writePrivateText } from "../paths.js";
 import type {
 	HeldMessage,
 	HeldSender,
@@ -52,6 +52,19 @@ const heldSchema = z.object({
 
 export const MESSAGES_FILE = "messages.jsonl";
 export const HELD_FILE = "held.jsonl";
+/** Outbound messages written by `agx send`, which must work while `serve` holds the lock. */
+export const SPOOL_FILE = "outbox.jsonl";
+const CLAIMED_PREFIX = "outbox.claimed.";
+
+const outboundSchema = z.object({
+	id: z.string(),
+	peer: z.string(),
+	subject: z.string().nullable(),
+	contextId: z.string().nullable(),
+	text: z.string(),
+	at: z.string(),
+	deliveryStatus: z.string(),
+});
 
 /** Parse JSON-lines, dropping lines that are not valid records. */
 function readLines<T>(path: string, schema: z.ZodType<T>): T[] {
@@ -98,15 +111,80 @@ export class MessageStore {
 	private held: HeldSender[];
 	private messagesDirty = false;
 	private heldDirty = false;
+	/** Spool files this store took over; removed once their messages are written. */
+	private claimed: string[] = [];
 
+	/**
+	 * `claimSpool` is for the process that holds the profile lock and will flush:
+	 * it takes over what `agx send` spooled. Without it the spool is only read, so a
+	 * reader sees sent messages without changing any file.
+	 */
 	constructor(
-		dir: string,
+		private readonly dir: string,
 		private readonly now: () => Date = () => new Date(),
+		options: { claimSpool?: boolean } = {},
 	) {
 		this.messagesPath = join(dir, MESSAGES_FILE);
 		this.heldPath = join(dir, HELD_FILE);
 		this.messages = readLines(this.messagesPath, messageSchema);
 		this.held = readLines(this.heldPath, heldSchema);
+		if (options.claimSpool === true) {
+			this.absorbSpool();
+		} else {
+			this.readSpool();
+		}
+	}
+
+	/**
+	 * Queue an outbound message for the next store writer. `agx send` calls this
+	 * instead of taking the lock, because `serve` may hold it for hours. An append
+	 * of one short line is atomic, so concurrent sends do not interleave.
+	 */
+	static spoolOutbound(dir: string, message: NewOutboundMessage): void {
+		ensureDir(dir);
+		const path = join(dir, SPOOL_FILE);
+		appendFileSync(path, `${JSON.stringify(message)}\n`, { mode: 0o600 });
+		chmodSync(path, 0o600);
+	}
+
+	private spoolFiles(): { claimed: string[]; live: string | null } {
+		const claimed = existsSync(this.dir)
+			? readdirSync(this.dir)
+					.filter((name) => name.startsWith(CLAIMED_PREFIX))
+					.map((name) => join(this.dir, name))
+			: [];
+		const live = join(this.dir, SPOOL_FILE);
+		return { claimed, live: existsSync(live) ? live : null };
+	}
+
+	private ingestFiles(files: string[]): void {
+		for (const file of files) {
+			for (const record of readLines(file, outboundSchema)) {
+				this.addOutbound(record);
+			}
+		}
+	}
+
+	/** Reader: sees spooled sends, changes nothing on disk. */
+	private readSpool(): void {
+		const { claimed, live } = this.spoolFiles();
+		this.ingestFiles(live ? [...claimed, live] : claimed);
+		// Nothing needs writing for what a reader only looked at.
+		this.messagesDirty = false;
+	}
+
+	/** Writer: take over what `agx send` spooled; `flush()` removes it once written. */
+	absorbSpool(): void {
+		const { claimed, live } = this.spoolFiles();
+		const files = [...claimed];
+		if (live) {
+			// Rename first: a send that lands after this goes to a fresh spool file.
+			const taken = join(this.dir, `${CLAIMED_PREFIX}${process.pid}.${Date.now()}`);
+			renameSync(live, taken);
+			files.push(taken);
+		}
+		this.ingestFiles(files);
+		this.claimed = [...new Set([...this.claimed, ...files])];
 	}
 
 	private has(id: string): boolean {
@@ -330,5 +408,10 @@ export class MessageStore {
 			writeLines(this.heldPath, this.held);
 			this.heldDirty = false;
 		}
+		// Only after the history is on disk, so a crash re-reads the spool.
+		for (const file of this.claimed) {
+			rmSync(file, { force: true });
+		}
+		this.claimed = [];
 	}
 }

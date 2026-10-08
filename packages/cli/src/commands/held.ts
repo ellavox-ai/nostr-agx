@@ -42,7 +42,7 @@ export function heldDecideCommand(decision: HeldDecision, peer: string, options:
 	const npub = toDisplayNpub(hex);
 	const releaseLock = acquireLock(profileName, EXIT.generic);
 	try {
-		const store = new MessageStore(profileDir(profileName));
+		const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
 		let released = 0;
 		if (decision === "allow") {
 			// The allowlist first: if this stops early, running it again releases the text.

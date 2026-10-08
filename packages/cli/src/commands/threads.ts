@@ -25,7 +25,7 @@ export function threadCommand(contextId: string, options: ThreadsOptions): void 
 	// Marking read writes, so it takes the lock; reading alone does not.
 	const releaseLock = options.markRead ? acquireLock(profileName, EXIT.generic) : null;
 	try {
-		const store = new MessageStore(dir);
+		const store = new MessageStore(dir, undefined, { claimSpool: options.markRead === true });
 		const messages = store.getThread(contextId);
 		if (messages.length === 0) {
 			throw new AgxCliError(`No thread "${contextId}".`, {

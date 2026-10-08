@@ -40,7 +40,7 @@ export interface InboundMessageView {
 export function renderInboundLines(view: InboundMessageView): string[] {
 	if (view.allowedOnly && !view.allowed) {
 		return [
-			`${kleur.yellow("HOLD ")} from ${view.fromNpub} — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow ${view.fromNpub} (then ask them to resend)`,
+			`${kleur.yellow("HOLD ")} from ${view.fromNpub} — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow ${view.fromNpub} (or: agx held ignore | agx held block)`,
 		];
 	}
 	const from = view.fullIds ? view.fromNpub : shortNpub(view.fromNpub);

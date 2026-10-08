@@ -63,7 +63,7 @@ export async function inboxCommand(options: InboxOptions): Promise<void> {
 	try {
 		const allowed = new Set(profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")));
 		const state = loadState(profileName);
-		const store = new MessageStore(profileDir(profileName));
+		const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
 		const seen = new FileSeenStore(profileName);
 		const collector = createCollector({ store, allowed });
 

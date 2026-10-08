@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
 	MAX_NEW_SENDERS_PER_HOUR,
 	MESSAGES_FILE,
 	MessageStore,
+	SPOOL_FILE,
 } from "./message-store";
 import type { NewMessage } from "./types";
 
@@ -259,5 +260,55 @@ describe("delivery receipts", () => {
 		expect(store.setDeliveryStatus("out1", "delivered")).toBe(true);
 		expect(store.setDeliveryStatus("out1", "delivered")).toBe(false);
 		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("delivered");
+	});
+});
+
+describe("outbound spool", () => {
+	const sent = { id: "out1", peer: BOB, subject: "S", contextId: "ctx-1", text: "sent text", at: "2026-10-07T10:00:00.000Z", deliveryStatus: "sent" };
+
+	it("lets a reader see a sent message without changing any file", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		expect(statSync(join(dir, SPOOL_FILE)).mode & 0o777).toBe(0o600);
+		const reader = open();
+		expect(reader.listMessages({ direction: "out" }).map((m) => m.text)).toEqual(["sent text"]);
+		reader.flush();
+		expect(existsSync(join(dir, MESSAGES_FILE))).toBe(false);
+		expect(existsSync(join(dir, SPOOL_FILE))).toBe(true);
+	});
+
+	it("is taken over by the writer, written to the history, then removed", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		MessageStore.spoolOutbound(dir, { ...sent, id: "out2", at: "2026-10-07T10:01:00.000Z" });
+		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
+		expect(writer.listMessages({ direction: "out" })).toHaveLength(2);
+		expect(existsSync(join(dir, SPOOL_FILE))).toBe(false);
+		writer.flush();
+		expect(readdirSync(dir).filter((f) => f.startsWith("outbox"))).toEqual([]);
+		expect(open().listMessages({ direction: "out" })).toHaveLength(2);
+	});
+
+	it("keeps a send that lands after the writer took over", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
+		MessageStore.spoolOutbound(dir, { ...sent, id: "late", at: "2026-10-07T10:02:00.000Z" });
+		writer.flush();
+		expect(open().listMessages({ direction: "out" }).map((m) => m.id)).toEqual(["out1", "late"]);
+	});
+
+	it("re-reads a claimed file left by a crash and does not duplicate", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		new MessageStore(dir, () => clock, { claimSpool: true });
+		expect(readdirSync(dir).some((f) => f.startsWith("outbox.claimed."))).toBe(true);
+		const next = new MessageStore(dir, () => clock, { claimSpool: true });
+		next.flush();
+		const ids = open().listMessages({ direction: "out" }).map((m) => m.id);
+		expect(ids).toEqual(["out1"]);
+		expect(readdirSync(dir).filter((f) => f.startsWith("outbox"))).toEqual([]);
+	});
+
+	it("ignores a torn spool line", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		writeFileSync(join(dir, SPOOL_FILE), `${readFileSync(join(dir, SPOOL_FILE), "utf8")}{"id":"torn"\n`);
+		expect(open().listMessages({ direction: "out" })).toHaveLength(1);
 	});
 });
