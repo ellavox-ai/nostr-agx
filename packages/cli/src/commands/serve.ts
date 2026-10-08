@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -12,13 +12,13 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
+import { acquireLock } from "../lib/lock.js";
 import {
 	neutralizeControls,
 	oneLineJson,
 	renderInboundLines,
 } from "../lib/inbound-lines.js";
 import { heading, info, kv, say, shortNpub, warn } from "../lib/output.js";
-import { ensureDir, lockPath, profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import {
 	capabilitiesToServe,
@@ -127,36 +127,6 @@ async function loadHandlerModule(
 		handlers[key] = value as HandlerModule[string];
 	}
 	return handlers;
-}
-
-function acquireLock(profile: string): () => void {
-	const path = lockPath(profile);
-	ensureDir(profileDir(profile));
-	if (existsSync(path)) {
-		const pid = Number(readFileSync(path, "utf8").trim());
-		// A stale lock from a crashed run must not block a restart forever, so the
-		// pid is probed rather than trusted.
-		let alive = false;
-		try {
-			process.kill(pid, 0);
-			alive = true;
-		} catch {
-			alive = false;
-		}
-		if (alive) {
-			throw new AgxCliError(
-				`Another \`agx serve\` is already running for profile "${profile}" (pid ${pid}).`,
-				{
-					exitCode: EXIT.config,
-					remediation:
-						"The seen-store is single-writer, so only one may run per profile. Stop the other one, or use a second profile:\n    agx serve --profile other",
-				},
-			);
-		}
-		rmSync(path, { force: true });
-	}
-	writeFileSync(path, `${process.pid}\n`, { mode: 0o600 });
-	return () => rmSync(path, { force: true });
 }
 
 export async function serveCommand(options: ServeOptions): Promise<void> {
