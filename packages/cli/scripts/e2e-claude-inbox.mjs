@@ -807,7 +807,12 @@ async function main() {
 
 	// --------------------------------------------------------------- (k)
 	step("k) --summary never prints peer text, subjects or npubs");
-	const sumHuman = await agxOk(["--profile", "carol", "inbox", "--summary", "--wait", "3", "--no-color"]);
+	// A hook runs this with a few seconds to spare: the pull must end when it is done, not after --wait.
+	const quickStart = Date.now();
+	const sumHuman = await agxOk(["--profile", "carol", "inbox", "--summary", "--no-color"]);
+	if (Date.now() - quickStart > 5_000) {
+		fail(`agx inbox --summary took ${Date.now() - quickStart} ms on an idle relay; it must return when the pull is done`, sumHuman.stdout);
+	}
 	if (!/^0 new · 1 unread · 1 held$/m.test(sumHuman.stdout)) {
 		fail("the human summary is not '0 new · 1 unread · 1 held'", sumHuman.stdout);
 	}
