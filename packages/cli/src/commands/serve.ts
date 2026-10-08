@@ -172,7 +172,11 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	const seen = new FileSeenStore(profileName);
 	// Keeps what arrives, held senders' text included. Output below is unchanged.
 	const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
-	const collector = createCollector({ store, allowed });
+	const collector = createCollector({
+		store,
+		allowed,
+		onError: (error) => warn(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
+	});
 	const stats = { ...state.stats };
 	/** Replies sent per `${peer}:${contextId}`, for the process's lifetime. The
 	 * local bound the SPEC requires alongside the sender-declared depth. */

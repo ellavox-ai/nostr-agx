@@ -12,7 +12,7 @@ import {
 	summaryLine,
 } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
-import { json, say } from "../lib/output.js";
+import { json, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toHexPubkey } from "../lib/peer.js";
 import { probeRelay } from "../lib/relay-probe.js";
@@ -65,7 +65,11 @@ export async function inboxCommand(options: InboxOptions): Promise<void> {
 		const state = loadState(profileName);
 		const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
 		const seen = new FileSeenStore(profileName);
-		const collector = createCollector({ store, allowed });
+		const collector = createCollector({
+			store,
+			allowed,
+			onError: (error) => warn(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
+		});
 
 		const transport = await createTransport(profile, identity, logger);
 		const client = new AgxClient({

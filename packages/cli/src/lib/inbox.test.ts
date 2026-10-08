@@ -15,6 +15,7 @@ import {
 	summaryLine,
 } from "./inbox";
 import { MessageStore } from "./store/message-store";
+import type { StoredMessage } from "./store/types";
 
 const BOB_HEX = "1".repeat(64);
 const MALLORY_HEX = "2".repeat(64);
@@ -107,6 +108,49 @@ describe("collector", () => {
 		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("delivered");
 		expect(c.receipts[0]).toMatchObject({ from: BOB, ref: "out1", status: "delivered" });
 	});
+
+	it("ignores a receipt from anyone but the peer the message went to", () => {
+		store.addOutbound({ id: "out1", peer: BOB, subject: null, contextId: "ctx-1", text: "yo", at: NOW.toISOString(), deliveryStatus: "sent" });
+		const c = collector();
+		c.onReceipt({
+			from: MALLORY_HEX,
+			eventId: "r1",
+			createdAt: 1_790_000_000,
+			receipt: { refEventId: "out1", status: "quarantined" },
+		} as unknown as AgxIncomingReceipt);
+		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("sent");
+		expect(c.receipts).toHaveLength(0);
+	});
+
+	it("shows a receipt from an allowed sender even when it matches no stored message", () => {
+		const c = collector();
+		c.onReceipt({
+			from: BOB_HEX,
+			eventId: "r2",
+			createdAt: 1_790_000_000,
+			receipt: { refEventId: "unknown", status: "delivered" },
+		} as unknown as AgxIncomingReceipt);
+		expect(c.receipts).toHaveLength(1);
+	});
+
+	it.each([-1e13, 1e13, 0.5, Number.NaN, 1_000])("falls back to the transport time for an implausible sentAt (%s)", (sentAt) => {
+		const c = collector();
+		c.onMessage(incoming(BOB_HEX, { sentAt }));
+		expect(c.messages).toHaveLength(1);
+		expect(c.messages[0]?.at).toBe(new Date(1_790_000_000 * 1000).toISOString());
+	});
+
+	it("reports a store failure and rethrows it so the core retries", () => {
+		const seen: unknown[] = [];
+		const broken = createCollector({
+			store: { addInbound: () => { throw new Error("disk full"); } } as unknown as MessageStore,
+			allowed: new Set([BOB_HEX]),
+			now: () => NOW,
+			onError: (error) => seen.push(error),
+		});
+		expect(() => broken.onMessage(incoming(BOB_HEX))).toThrow("disk full");
+		expect(seen).toHaveLength(1);
+	});
 });
 
 function report(overrides: Partial<InboxReport> = {}): InboxReport {
@@ -179,5 +223,23 @@ describe("human output", () => {
 		const quiet = renderInboxLines(report({ held }), { fullIds: true, heldNow: new Set(), newCount: 0, unreadCount: 3 });
 		expect(quiet.join("\n")).not.toContain("HOLD");
 		expect(quiet.at(-1)).toBe("0 new · 3 unread · 1 held");
+	});
+
+	it("shows our own messages as SENT, never as received from the peer", () => {
+		const own: StoredMessage = {
+			id: "o1",
+			direction: "out",
+			peer: BOB,
+			subject: null,
+			contextId: "ctx-1",
+			contextIdWithheld: false,
+			text: "OWN-WORDS",
+			at: NOW.toISOString(),
+			deliveryStatus: "sent",
+			readAt: NOW.toISOString(),
+		};
+		const lines = renderInboxLines(report({ messages: [own] }), { fullIds: true, heldNow: new Set(), newCount: 0, unreadCount: 0 });
+		expect(lines).toContain(`SENT  to ${BOB}  sent`);
+		expect(lines.filter((l) => l.startsWith("RECV"))).toHaveLength(0);
 	});
 });
