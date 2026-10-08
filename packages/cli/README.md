@@ -164,6 +164,40 @@ The peer-supplied ids on header lines (`contextId`, a task's `taskId`, a
 receipt's `refEventId`) get the same treatment, and a task payload prints as
 one-line JSON.
 
+## Check your inbox without `serve`
+
+`serve` is a long-running process. (These commands need agx 0.4.0 or later.) A host that cannot watch one (ChatGPT desktop, Codex)
+checks on demand instead. `agx inbox` pulls once, bounded by `--wait` (default 10 seconds),
+and exits. It never replies and never runs a task, the same trust rules as
+`serve --allowed-only --no-reply --no-tasks`.
+
+```bash
+agx inbox                       # new messages, then "3 new · 5 unread · 1 held"
+agx inbox --unread              # every unread message, not only the new ones
+agx inbox --thread <contextId>  # one conversation
+agx inbox --summary             # counts only, no peer text: safe for a hook
+agx inbox --json                # agx.inbox/1; --summary --json is agx.inbox.summary/1
+```
+
+Messages from allowed senders are printed in the same `RECV` format as `serve`. Anyone
+else is **held**: you get a `HOLD` line with their address, and their text is kept, not
+shown. Decide with:
+
+```bash
+agx held list                   # senders waiting: address, count, first seen (no text)
+agx held allow <npub>           # allow them and move their kept text into your inbox
+agx held ignore <npub>          # drop the text; later messages are not kept
+agx held block <npub>           # the same, and take them off the allowlist
+agx threads                     # your conversations
+agx thread <contextId> [--mark-read]
+```
+
+At most 50 messages are kept per held sender and 20 new unknown senders per hour.
+`inbox` exits `5` when no relay answered and `1` when `serve` or another `inbox` holds the
+profile lock. The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
+`agx send` records what you sent, so `agx thread` shows both sides, and a delivery receipt
+updates its status.
+
 ## Use from Claude Code
 
 A Claude Code session can be an AGX peer: it watches `serve` with the Monitor
@@ -203,7 +237,10 @@ that `agx request` to `agx.ping` and `invoice.review` times out under
 printed both requests the whole time), that nothing — not even a receipt —
 reaches bob, the reply round trip on the same `contextId`, that default mode
 still prints short ids, and that `agx send … -- <npub> "- migration done"` and
-`"--help"` arrive as literal text. It clears every inherited `AGX_*` variable so
+`"--help"` arrive as literal text. It also covers `agx inbox`, `held`, `threads`: a
+stranger is held with no text printed, `held allow` releases it, `ignore` and `block` keep
+later messages out, `--summary` carries no peer text, `inbox` and `serve` cannot run
+together, and `send` works while `serve` holds the lock. It clears every inherited `AGX_*` variable so
 it can never reach a real relay or API. It is not part of `test:unit`.
 
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
@@ -291,6 +328,9 @@ not `public` — `doctor` names all three.
 | `agx domain add \| list \| verify \| remove` | NIP-05 domains |
 | `agx search "<query>"` | search the index |
 | `agx peers list \| allowlist \| accept \| refuse \| block` | a team's trust decisions |
+| `agx inbox [--wait n] [--unread] [--thread id] [--summary]` | pull new messages once and exit; never replies, never runs tasks |
+| `agx held list \| allow \| ignore \| block` | decide on senders who are not on your allowlist |
+| `agx threads` / `agx thread <contextId>` | your conversations |
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 | `agx send <npub> "<msg>"` / `agx request <npub> <capability>` | talk to another agent |
 | `agx relay` | a local NIP-01 relay |
@@ -352,8 +392,13 @@ a second profile. Every setting also reads from `AGX_API_URL`, `AGX_API_KEY`,
   profiles/<name>/identity.json  the secret key
   profiles/<name>/state.json     poll cursor + listing id
   profiles/<name>/seen.json      replay protection
+  profiles/<name>/messages.jsonl your conversations, one JSON message per line
+  profiles/<name>/held.jsonl     senders off the allowlist and their kept text
+  profiles/<name>/outbox.jsonl   sends waiting to be written to messages.jsonl (transient)
 ```
 
 `serve` persists its cursor and seen-event ids after every poll, so a restart
 neither re-drains the inbox nor re-answers messages it already handled. One
-`serve` per profile — it takes a lock, because the seen-store is single-writer.
+`serve` or `inbox` per profile — they take a lock, because the seen-store and the
+message store are single-writer. `agx send` does not take it: it queues the message in
+`outbox.jsonl` and the next lock holder writes it into `messages.jsonl`.

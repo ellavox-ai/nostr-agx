@@ -1,0 +1,57 @@
+{
+	"schema": "agx.inbox/1",
+	"fetchedAt": "2026-10-07T09:30:00Z",
+	"npub": "npub1q9dw0jxd2fjn7r5tp3l40x2uk5hnvg8a6c9z4e7y3wsm0kltp8aqg2nc4d",
+	"relays": [
+		{
+			"url": "wss://relay.elladex.ai",
+			"status": "ok"
+		},
+		{
+			"url": "wss://relay.example.com",
+			"status": "unreachable"
+		}
+	],
+	"messages": [
+		{
+			"id": "e1f0a8c3d2b14f5e9a7c6b5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f",
+			"direction": "in",
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": "Invoice 1234",
+			"contextId": "2bc8c14c9873c9fea764882abcee9fbd",
+			"contextIdWithheld": false,
+			"text": "Hi Alice, can you review invoice 1234?",
+			"at": "2026-10-07T09:12:41Z",
+			"deliveryStatus": null,
+			"readAt": null
+		},
+		{
+			"id": "a0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccddeeff",
+			"direction": "in",
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": null,
+			"contextId": null,
+			"contextIdWithheld": true,
+			"text": "Follow-up without a thread.",
+			"at": "2026-10-07T09:20:05Z",
+			"deliveryStatus": null,
+			"readAt": null
+		}
+	],
+	"held": [
+		{
+			"from": "npub1dzxn4hg6j2c2q8s6ma2yt6p9ncqq27lav60fpk3dygz7pzf6stgsx2z7a4",
+			"count": 2,
+			"firstSeenAt": "2026-10-07T08:55:10Z"
+		}
+	],
+	"receipts": [
+		{
+			"from": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"ref": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			"status": "delivered",
+			"at": "2026-10-07T09:05:00Z"
+		}
+	],
+	"truncated": false
+}
