@@ -259,12 +259,13 @@ function fromDataCode(
 				"Open the link (or send it to an org admin) and publish there. Nothing else will make the listing public.",
 			);
 		}
+		// Reserved (LOGIN-CONTRACT.md §1.7): no server sends it today. The
+		// login approval page records no Terms acceptance, so logging in again
+		// is never the fix; the browser is.
 		return new HumanActionRequiredError(
 			`${context}: the current Terms have to be accepted first: ${url}`,
 			{ reason, url, userCode: null, expiresIn: null },
-			data.loginRequired === true
-				? "Accept them by logging in again:\n    agx login"
-				: "Accept them in the browser, then re-run the command.",
+			"Accept them in the browser, then re-run the command.",
 		);
 	}
 

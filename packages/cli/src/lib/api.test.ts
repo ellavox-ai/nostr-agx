@@ -98,6 +98,24 @@ describe("toCliError: every LOGIN-CONTRACT.md §1.7 data.code", () => {
 		});
 	});
 
+	it("TERMS_ACCEPTANCE_REQUIRED (reserved) is fixed in the browser, never by logging in again, whatever loginRequired says", () => {
+		const fixture = fromFixture("TERMS_ACCEPTANCE_REQUIRED");
+		for (const loginRequired of [false, true]) {
+			const error = toCliError(
+				new ORPCError(fixture.code, {
+					status: fixture.status,
+					message: fixture.message,
+					data: { ...(fixture.data as Record<string, unknown>), loginRequired },
+				}),
+				"x",
+				BASE,
+			);
+			expect(error.exitCode).toBe(7);
+			expect(error.remediation).toMatch(/in the browser/);
+			expect(error.remediation).not.toMatch(/agx login/);
+		}
+	});
+
 	it("API_KEY_RATE_LIMITED says how long to wait", () => {
 		expect(toCliError(fromFixture("API_KEY_RATE_LIMITED"), "x", BASE).message).toMatch(/2 s/);
 	});

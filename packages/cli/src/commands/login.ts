@@ -58,8 +58,8 @@ import { isWellFormedApiKey, rememberSecret } from "../lib/secrets.js";
  * §1.8).
  *
  * The CLI asks the server for a code, a human approves it in the browser
- * (signing up, picking or creating the org, accepting the Terms), and the CLI's
- * poll receives a scoped, expiring key exactly once. The key goes straight to
+ * (signing up, picking or creating the org), and the CLI's poll receives a
+ * scoped, expiring key exactly once. The key goes straight to
  * `credentials.json` and is never printed. Nothing a harness reads — stdout,
  * stderr, exit codes — contains it or the device code.
  */
@@ -592,7 +592,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
 			);
 			console.error(
 				kleur.dim(
-					"Sign in or sign up there, pick or create the organization, accept the Terms, then approve.\n",
+					"Sign in or sign up there, pick or create the organization, then approve.\n",
 				),
 			);
 			if (

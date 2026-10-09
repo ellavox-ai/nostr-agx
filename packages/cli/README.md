@@ -54,7 +54,7 @@ agx logout                     # revoke the key on the server, then forget it
 ```
 
 In the browser you sign in (or sign up), check that the code matches, pick the
-organization — or create one, accepting the Terms — and approve. The CLI's poll
+organization — or create one — and approve. The CLI's poll
 then receives the key exactly once and stores it in `credentials.json` in the
 agx home directory, `0600` (see [Data on disk](#data-on-disk)). It is never
 printed: not by `login`, `whoami`, `config show`, or under `--json`.
@@ -482,7 +482,8 @@ With `--json`, exit 7 prints exactly one object on stdout:
 {"actionRequired":{"reason":"TERMS_ACCEPTANCE_REQUIRED","url":"https://www.ellaworks.ai/en/legal/terms","userCode":null,"expiresIn":null}}
 ```
 
-`reason` is a closed list. `url` is always absolute and always on the server agx
+`reason` is a closed list; `TERMS_ACCEPTANCE_REQUIRED` is reserved, and no
+server sends it today. `url` is always absolute and always on the server agx
 is talking to (the Terms page may be elsewhere on the same site); a link that
 points anywhere else is replaced by that server's `/elladex` page. Hand the URL,
 and `userCode` when there is one, to a person; never open or fill the page in

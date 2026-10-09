@@ -7,7 +7,7 @@ import { type LoginOptions, loginCommand } from "./login.js";
  * `agx org list` reads the organizations the credential can see (a login key
  * sees only its own). `agx org create` never creates anything itself: it is
  * `agx login --new-org`, so a human creates the organization on the approval
- * page and accepts the Terms there.
+ * page.
  */
 
 export interface OrgOptions {

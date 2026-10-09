@@ -19,8 +19,9 @@ export const EXIT = {
 	remote: 6,
 	/**
 	 * A human has to do something in a browser first: approve a login, confirm
-	 * a public listing, accept the Terms. Not a failure. With `--json` the CLI
-	 * prints exactly one `{"actionRequired":{…}}` object on stdout.
+	 * a public listing, or (reserved, never sent today) accept new Terms. Not a
+	 * failure. With `--json` the CLI prints exactly one `{"actionRequired":{…}}`
+	 * object on stdout.
 	 */
 	humanAction: 7,
 	interrupted: 130,

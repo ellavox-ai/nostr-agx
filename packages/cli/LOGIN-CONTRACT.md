@@ -165,8 +165,9 @@ The person opens `verification_uri_complete`, signs in or signs up (the code sur
 - the scopes the key will have;
 - the key's lifetime (90 days on Elladex).
 
-They then pick an organization in which they are an owner or admin, or create one from the prefill, accept the current Terms, and approve or deny.
+They then pick an organization in which they are an owner or admin, or create one from the prefill, and approve or deny.
 
+- The page may link the current Terms. Following the link is optional: there is nothing to tick, nothing is recorded, and approving does not depend on it.
 - Denying is what agx sees as `access_denied`. Letting the code run out is `expired_token`.
 - The person may pick another organization than `org_hint`. The token response is the truth: agx reports the `organization` it returned, and names the requested one when the two differ (§1.8).
 
@@ -253,7 +254,7 @@ An API error (§1.1) may carry a stable `data.code`. agx branches on it before a
 | `data.code` | `code` / HTTP | Extra `data` fields | When | agx exit |
 |---|---|---|---|---|
 | `HUMAN_CONFIRMATION_REQUIRED` | `FORBIDDEN` / 403 | `url` (relative: `/elladex/listings/{listingId}?org={orgSlug}`), `listingId`, `requested: {"visibility":"public","status":"listed"}` | A scoped key tries to make a listing public and listed. An organization admin has to do that in the browser. | **7** |
-| `TERMS_ACCEPTANCE_REQUIRED` | `PRECONDITION_FAILED` / 412 | `termsVersion`, `url` (absolute Terms URL), `loginRequired: boolean` | Reserved: a server may raise it on an API-key call when the current Terms have not been accepted. | **7** |
+| `TERMS_ACCEPTANCE_REQUIRED` | `PRECONDITION_FAILED` / 412 | `termsVersion`, `url` (absolute Terms URL), `loginRequired: boolean` | Reserved: never sent today, since the approval page (§1.4) records no Terms acceptance. It stays in the contract so that agx already handles it should a server need it later. agx sends the person to `url` in the browser, never to `agx login`. | **7** |
 | `INSUFFICIENT_SCOPE` | `FORBIDDEN` / 403 | `required: string \| null` (null: not available to any scoped key), `granted: string[]` | A scoped key calls a procedure its scopes do not cover | 4 |
 | `API_KEY_INVALID` | `UNAUTHORIZED` / 401 | — | Unknown, deleted or revoked key. The `message` is exactly `Invalid API key`. | 4 |
 | `API_KEY_EXPIRED` | `UNAUTHORIZED` / 401 | — | The key has expired. A server may answer `API_KEY_INVALID` on later calls, once it has dropped the expired key. | 4 |
@@ -319,7 +320,7 @@ REST returns the same object without the `{"json":…}` envelope. The absolute U
 
 | Field | Type | Notes |
 |---|---|---|
-| `reason` | string | A closed list: the three values above. A new reason is a contract change. |
+| `reason` | string | A closed list: the three values above. `TERMS_ACCEPTANCE_REQUIRED` is reserved (§1.7). A new reason is a contract change. |
 | `url` | string | Always absolute, and always on the server agx is talking to (§1.7 "URLs"). For a login it is `verification_uri_complete`. |
 | `userCode` | string \| null | The code the person checks on the page. Null when there is none. |
 | `expiresIn` | number \| null | Seconds left, counted when the object is printed. Null when the action does not expire. |
