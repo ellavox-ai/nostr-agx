@@ -63,6 +63,9 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 	let releaseLock: () => void = () => undefined;
 	let closeSync: () => Promise<void> = async () => undefined;
 	if (options.devStore) {
+		if (process.env.AGX_UI_DEV_STORE !== "1") {
+			throw new AgxCliError("--dev-store is for tests only.", { exitCode: EXIT.usage, remediation: "Set AGX_UI_DEV_STORE=1 to use it." });
+		}
 		store = createDevStore(resolve(options.devStore));
 	} else {
 		releaseLock = acquireLock(profileName, EXIT.generic);
@@ -149,6 +152,9 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 				doctor: { status: "unknown", detail: "Run `agx doctor` for a full check." },
 			}),
 			send: async ({ to, subject, contextId, body }) => {
+				if (options.devStore) {
+					return { ok: false, detail: "Sending is off with --dev-store." };
+				}
 				const transport = await createTransport(profile, identity, makeLogger(options.verbose ?? false));
 				const res = await transport.publishMessage(toHexPubkey(to, "recipient"), {
 					text: body,
@@ -214,10 +220,11 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 			info("The link works once. Press Ctrl-C to stop.");
 			json({ ok: true, port: server.port, url: server.url });
 		} else {
-			info("Opening your browser. If nothing opens, run `agx ui --no-open` to print the one-time link. Press Ctrl-C to stop.");
+			info("Opening your browser. If nothing opens, press Ctrl-C and run `agx ui --no-open` to print the one-time link.");
 			json({ ok: true, port: server.port });
 			launchFile = openBrowserWithToken(server.url, () => {
-				warn("Could not open a browser. Run `agx ui --no-open` and open the link it prints.");
+				warn("Could not open a browser. Open this one-time link yourself:");
+				kv("link", server.url);
 			});
 		}
 		// Keep the process alive until shutdown.

@@ -122,9 +122,10 @@ export async function handleApi(
 			unreadOnly: url.searchParams.get("unread") === "1",
 			limit: 200,
 		});
+		const peers = store.listPeers();
 		return {
 			status: 200,
-			body: { messages: rows.map((m) => withPeer(m, deps)) },
+			body: { messages: rows.map((m) => withPeer(m, peers)) },
 		};
 	}
 
@@ -137,11 +138,12 @@ export async function handleApi(
 		const id = decodeURIComponent(threadMatch[1] as string);
 		if (method === "GET" && !threadMatch[2]) {
 			const messages = store.getThread(id);
+			const peers = store.listPeers();
 			return {
 				status: 200,
 				body: {
 					contextId: id,
-					messages: messages.map((m) => withPeer(m, deps)),
+					messages: messages.map((m) => withPeer(m, peers)),
 					awaitingReply: messages.at(-1)?.direction === "out",
 				},
 			};
@@ -357,8 +359,8 @@ async function handleSend(deps: ApiDeps, body: unknown): Promise<ApiResult> {
 	return { status: 200, body: { ok: true, message: stored } };
 }
 
-function withPeer<T extends { peer: string }>(message: T, deps: ApiDeps): T & { peerStatus: PeerStatus | null; peerLabel: string | null; peerVerified: boolean } {
-	const record = deps.store.listPeers().find((p) => p.npub === message.peer);
+function withPeer<T extends { peer: string }>(message: T, peers: PeerRecord[]): T & { peerStatus: PeerStatus | null; peerLabel: string | null; peerVerified: boolean } {
+	const record = peers.find((p) => p.npub === message.peer);
 	return {
 		...message,
 		peerStatus: record?.status ?? null,
