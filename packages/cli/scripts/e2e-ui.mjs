@@ -16,7 +16,7 @@
  * point AGX_UI_CHROMIUM at a Chrome/Chromium binary.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -190,11 +190,13 @@ async function main() {
 	const alice = await makeProfile("alice");
 	const bob = await makeProfile("bob");
 	const mallory = await makeProfile("mallory");
+	const carol = await makeProfile("carol");
 	await agxOk(["--profile", "bob", "identity", "allow", alice]);
 	pass(`relay ${relayUrl}`);
 
 	// Real mail, through the relay: an allowed peer and a stranger, each with the XSS corpus.
 	await agxOk(["--profile", "alice", "identity", "allow", bob]);
+	await agxOk(["--profile", "alice", "identity", "allow", carol]);
 	for (const [index, payload] of XSS.entries()) {
 		await agxOk(["--profile", "bob", "send", "--subject", `<b>subject ${index}</b>`, "--context-id", `ctx-xss-${index}`, "--", alice, payload]);
 		await agxOk(["--profile", "mallory", "send", "--subject", "<i>held</i>", "--", alice, payload]);
@@ -211,9 +213,15 @@ async function main() {
 	try {
 		const page = await (await browser.newContext()).newPage();
 		const base = link.split("?")[0];
-		await page.goto(link);
-		await page.waitForSelector("nav");
-		pass("one-time link opened; cookie set");
+		// The way `agx ui` opens a browser by default: a local file that redirects to the one-time link.
+		const launcher = join(home, "launch.html");
+		writeFileSync(launcher, `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(link)})</script>`);
+		await page.goto(`file://${launcher}`);
+		const loggedIn = await page.waitForSelector("nav", { timeout: 10_000 }).then(() => true, () => false);
+		if (!loggedIn) {
+			fail("opening the link from a file:// page did not log in", await page.locator("body").innerText());
+		}
+		pass("one-time link opened from a file:// page; cookie set");
 
 		const stranger = await browser.newContext();
 		const replay = await (await stranger.newPage()).goto(link);
@@ -266,7 +274,8 @@ async function main() {
 		await page.emulateMedia({ colorScheme: "light" });
 		pass(`${VIEWS.length} views x 2 themes: no violations`);
 
-		step("held -> allow");
+		step("held -> allow, without undoing a change made elsewhere");
+		await agxOk(["--profile", "alice", "identity", "deny", carol]);
 		await page.goto(`${base}#/held`);
 		await page.getByRole("button", { name: "Allow" }).first().click();
 		await page.waitForSelector("text=No held senders.");
@@ -311,6 +320,9 @@ async function main() {
 		const allowList = await agxOk(["--profile", "alice", "identity", "allow", "--list", "--no-color"]);
 		if (!allowList.stdout.includes(mallory)) {
 			fail("the sender allowed in the UI is not on the profile allowlist", allowList.stdout);
+		}
+		if (allowList.stdout.includes(carol)) {
+			fail("the UI put back a peer that was removed with `agx identity deny` while it ran", allowList.stdout);
 		}
 		const history = readFileSync(join(home, "profiles", "alice", "messages.jsonl"), "utf8");
 		if (!history.includes(JSON.stringify(SEND_BODY).slice(1, -1))) {

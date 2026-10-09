@@ -287,9 +287,7 @@ private keys), and stops a second message in a thread that has had no reply.
 **Your real mail.** `agx ui` runs on the same message store as `agx inbox`, `agx held` and
 `agx threads`, and pulls new messages every 30 seconds while it is open (it never replies and
 never runs a task). Allow, ignore and block in the UI do what `agx held` does. It takes the
-profile lock, so `agx serve` and `agx inbox` cannot run beside it; `agx send` still works. To try
-the UI on sample data without touching a profile, use `agx ui --dev-store ./agx-ui-dev.json`.
-The public Elladex lookup for adding a peer by handle uses `AGX_ELLADEX_URL` (default
+profile lock, so `agx serve` and `agx inbox` cannot run beside it; `agx send` still works. The public Elladex lookup for adding a peer by handle uses `AGX_ELLADEX_URL` (default
 `https://app.ellaworks.ai`).
 
 ## Agent Cards

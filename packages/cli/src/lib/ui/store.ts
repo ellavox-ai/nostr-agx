@@ -1,10 +1,9 @@
 /**
  * What `agx ui` needs from local storage.
  *
- * The real store ships with `agx inbox` (EL-361, `$AGX_HOME/profiles/<p>/`).
- * The UI depends on this interface only, so that store plugs in without a UI
- * change. `dev-store.ts` is a JSON-lines implementation for tests and
- * `agx ui --dev-store`.
+ * The real store is the one behind `agx inbox` (`agx-store.ts`). The UI depends
+ * on this interface only. `dev-store.ts` is a JSON implementation for tests and
+ * the hidden `agx ui --dev-store`.
  */
 
 export type Direction = "in" | "out";

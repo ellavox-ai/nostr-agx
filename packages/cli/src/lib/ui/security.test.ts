@@ -5,7 +5,7 @@ import {
 	CSRF_HEADER,
 	parseCookies,
 	SECURITY_HEADERS,
-	SESSION_COOKIE,
+	sessionCookieName,
 	sessionCookie,
 } from "./security.js";
 
@@ -21,7 +21,7 @@ function login(now = () => Date.now()) {
 	if (!session) {
 		throw new Error("login failed");
 	}
-	const cookie = `${SESSION_COOKIE}=${session.id}`;
+	const cookie = `${sessionCookieName(PORT)}=${session.id}`;
 	const good = {
 		host: `127.0.0.1:${PORT}`,
 		cookie,
@@ -82,7 +82,7 @@ describe("API authorization", () => {
 
 	it("rejects a cookie that is not a session (401)", () => {
 		const { security, good } = login();
-		expect(security.authorizeApi(request({ ...good, cookie: `${SESSION_COOKIE}=forged` }))).toMatchObject({ ok: false, status: 401 });
+		expect(security.authorizeApi(request({ ...good, cookie: `${sessionCookieName(PORT)}=forged` }))).toMatchObject({ ok: false, status: 401 });
 	});
 
 	it("rejects a missing or wrong CSRF header (403)", () => {
@@ -126,9 +126,13 @@ describe("API authorization", () => {
 });
 
 describe("cookie and headers", () => {
+	it("names the cookie after the port, so two servers do not share one", () => {
+		expect(sessionCookieName(4100)).not.toBe(sessionCookieName(4101));
+	});
+
 	it("sets an HttpOnly, SameSite=Strict cookie", () => {
 		const { session } = login();
-		const cookie = sessionCookie(session);
+		const cookie = sessionCookie(session, PORT);
 		expect(cookie).toContain("HttpOnly");
 		expect(cookie).toContain("SameSite=Strict");
 		expect(cookie).toContain("Path=/");

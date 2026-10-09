@@ -20,6 +20,9 @@ import {
 	sessionCookie,
 } from "./security.js";
 
+const LAUNCH_PAGE =
+	'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/"><title>agx ui</title><p>Opening agx ui\u2026</p>';
+
 export interface UiAssets {
 	html: string;
 	js: string;
@@ -104,8 +107,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
 			if (!session) {
 				return sendText(res, 403, "This link was already used or has expired. Run agx ui again.");
 			}
-			res.writeHead(303, { ...SECURITY_HEADERS, location: "/", "set-cookie": sessionCookie(session) });
-			return void res.end();
+			// A 200 page that moves on by itself, not a 303: when the link was opened from a
+			// file:// page the redirect counts as cross-site and a Strict cookie is not sent with it.
+			res.writeHead(200, {
+				...SECURITY_HEADERS,
+				"content-type": "text/html; charset=utf-8",
+				"set-cookie": sessionCookie(session, port),
+			});
+			return void res.end(LAUNCH_PAGE);
 		}
 
 		const verdict = security.authorizePage(req);

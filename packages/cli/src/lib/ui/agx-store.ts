@@ -30,8 +30,10 @@ export interface AgxStoreOptions {
 	store: MessageStore;
 	/** Hex pubkeys on the profile allowlist; shared with whatever sorts incoming mail. */
 	allowed: Set<string>;
-	/** Write the allowlist back to the profile. */
-	persistAllow: (allowed: string[]) => void;
+	/** The allowlist as saved in the profile now (`agx identity allow|deny` can change it while the UI runs). */
+	loadAllow: () => string[];
+	/** Add or remove one entry in the saved profile, leaving the rest as it is on disk. */
+	changeAllow: (hex: string, on: boolean) => void;
 	sync?: () => Promise<SyncResult>;
 }
 
@@ -57,17 +59,22 @@ export function createAgxStore(options: AgxStoreOptions): UiStore {
 		store.flush();
 	}
 
+	/** Bring the in-memory allowlist in line with the profile on disk. */
+	function refresh(): void {
+		const saved = options.loadAllow();
+		allowed.clear();
+		for (const hex of saved) {
+			allowed.add(hex);
+		}
+	}
+
 	function setAllowed(npub: string, on: boolean): void {
 		const hex = toHexPubkey(npub, "peer");
-		if (on === allowed.has(hex)) {
-			return;
+		refresh();
+		if (on !== allowed.has(hex)) {
+			options.changeAllow(hex, on);
+			refresh();
 		}
-		if (on) {
-			allowed.add(hex);
-		} else {
-			allowed.delete(hex);
-		}
-		options.persistAllow([...allowed]);
 	}
 
 	function lastDirection(thread: { contextId: string | null; peer: string }): "in" | "out" {
@@ -124,6 +131,7 @@ export function createAgxStore(options: AgxStoreOptions): UiStore {
 			commit();
 		},
 		listPeers(): PeerRecord[] {
+			refresh();
 			const record = (npub: string, status: PeerStatus): PeerRecord => ({
 				npub,
 				status,
@@ -156,6 +164,7 @@ export function createAgxStore(options: AgxStoreOptions): UiStore {
 			commit();
 		},
 		peerStatus(npub: string): PeerStatus | null {
+			refresh();
 			if (allowed.has(toHexPubkey(npub, "peer"))) {
 				return "allowed";
 			}

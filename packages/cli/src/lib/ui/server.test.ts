@@ -64,7 +64,7 @@ interface Client {
 
 async function connect(): Promise<Client> {
 	const launch = await fetch(ui.url, { redirect: "manual" });
-	expect(launch.status).toBe(303);
+	expect(launch.status).toBe(200);
 	const cookie = (launch.headers.get("set-cookie") ?? "").split(";")[0] as string;
 	const page = await fetch(`http://127.0.0.1:${ui.port}/`, { headers: { cookie } });
 	const csrf = /name="csrf" content="([^"]+)"/.exec(await page.text())?.[1] as string;
@@ -94,9 +94,10 @@ describe("listener and session", () => {
 
 	it("exchanges the launch link once, then drops it", async () => {
 		const first = await fetch(ui.url, { redirect: "manual" });
-		expect(first.status).toBe(303);
-		expect(first.headers.get("set-cookie")).toMatch(/HttpOnly.*SameSite=Strict/);
-		expect(first.headers.get("location")).toBe("/");
+		expect(first.status).toBe(200);
+		expect(first.headers.get("set-cookie")).toMatch(/agx_ui_\d+=.*HttpOnly.*SameSite=Strict/);
+		expect(first.headers.get("location")).toBeNull();
+		expect(await first.text()).toContain('http-equiv="refresh" content="0;url=/"');
 		const second = await fetch(ui.url, { redirect: "manual" });
 		expect(second.status).toBe(403);
 	});

@@ -9,6 +9,7 @@ import type { UiStore } from "./store";
 
 const BOB_HEX = "1".repeat(64);
 const MALLORY_HEX = "2".repeat(64);
+const CAROL_HEX = "3".repeat(64);
 const BOB = toNpub(BOB_HEX);
 const MALLORY = toNpub(MALLORY_HEX);
 const AT = "2026-10-07T10:00:00.000Z";
@@ -16,7 +17,7 @@ const AT = "2026-10-07T10:00:00.000Z";
 let dir: string;
 let messages: MessageStore;
 let allowed: Set<string>;
-let persisted: string[][];
+let disk: Set<string>;
 let store: UiStore;
 
 function msg(id: string, overrides: Record<string, unknown> = {}) {
@@ -27,8 +28,20 @@ beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "agx-ui-store-"));
 	messages = new MessageStore(dir);
 	allowed = new Set();
-	persisted = [];
-	store = createAgxStore({ dir, store: messages, allowed, persistAllow: (next) => persisted.push(next) });
+	disk = new Set();
+	store = createAgxStore({
+		dir,
+		store: messages,
+		allowed,
+		loadAllow: () => [...disk],
+		changeAllow: (hex, on) => {
+			if (on) {
+				disk.add(hex);
+			} else {
+				disk.delete(hex);
+			}
+		},
+	});
 });
 
 afterEach(() => {
@@ -88,7 +101,7 @@ describe("held senders", () => {
 	it("allow adds the sender to the allowlist, persists it and releases the text", () => {
 		store.decideHeld(MALLORY, "allow");
 		expect(allowed.has(MALLORY_HEX)).toBe(true);
-		expect(persisted).toEqual([[MALLORY_HEX]]);
+		expect([...disk]).toEqual([MALLORY_HEX]);
 		expect(store.listHeld()).toHaveLength(0);
 		expect(new MessageStore(dir).listMessages().map((m) => m.text)).toEqual(["let me in"]);
 		expect(store.peerStatus(MALLORY)).toBe("allowed");
@@ -99,11 +112,23 @@ describe("held senders", () => {
 		expect(store.peerStatus(MALLORY)).toBe("ignored");
 		expect(allowed.size).toBe(0);
 		messages.hold(BOB, msg("h2", { peer: BOB }));
-		allowed.add(BOB_HEX);
+		disk.add(BOB_HEX);
 		store.decideHeld(BOB, "block");
 		expect(allowed.has(BOB_HEX)).toBe(false);
 		expect(store.peerStatus(BOB)).toBe("blocked");
 		expect(readFileSync(join(dir, "held.jsonl"), "utf8")).not.toContain("let me in");
+	});
+
+	it("keeps an allowlist change made elsewhere while the UI runs", () => {
+		disk.add(BOB_HEX);
+		store.listPeers();
+		disk.delete(BOB_HEX);
+		disk.add(CAROL_HEX);
+		messages.hold(MALLORY, msg("h3", { peer: MALLORY }));
+		store.decideHeld(MALLORY, "allow");
+		expect([...disk].sort()).toEqual([CAROL_HEX, MALLORY_HEX].sort());
+		expect(allowed.has(BOB_HEX)).toBe(false);
+		expect(allowed.has(CAROL_HEX)).toBe(true);
 	});
 
 	it("rejects a decision about someone who is not held", () => {

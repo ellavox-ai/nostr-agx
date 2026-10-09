@@ -21,7 +21,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * response.
  */
 
-export const SESSION_COOKIE = "agx_ui";
+/** Browsers share cookies across ports, so the port is part of the name: two `agx ui` do not log each other out. */
+export function sessionCookieName(port: number): string {
+	return `agx_ui_${port}`;
+}
 export const CSRF_HEADER = "x-agx-csrf";
 
 /** How long a launch token can be exchanged. Single use either way. */
@@ -74,7 +77,7 @@ export function createSecurity(options: SecurityOptions): Security {
 	}
 
 	function sessionFromCookie(cookieHeader: string | undefined): Session | null {
-		const id = parseCookies(cookieHeader)[SESSION_COOKIE];
+		const id = parseCookies(cookieHeader)[sessionCookieName(options.port)];
 		if (!id) {
 			return null;
 		}
@@ -170,8 +173,8 @@ export function parseCookies(header: string | undefined): Record<string, string>
 	return out;
 }
 
-export function sessionCookie(session: Session): string {
-	return `${SESSION_COOKIE}=${session.id}; HttpOnly; SameSite=Strict; Path=/`;
+export function sessionCookie(session: Session, port: number): string {
+	return `${sessionCookieName(port)}=${session.id}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 /** Headers for every response. There is deliberately no CORS header. */

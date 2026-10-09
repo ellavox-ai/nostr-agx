@@ -68,14 +68,24 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 		releaseLock = acquireLock(profileName, EXIT.generic);
 		try {
 			const messages = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
-			const allowed = new Set(profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")));
+			const loadAllow = (): string[] =>
+				getProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
+			const allowed = new Set(loadAllow());
+			const refreshAllowed = (): void => {
+				allowed.clear();
+				for (const hex of loadAllow()) {
+					allowed.add(hex);
+				}
+			};
 			let pull: AgxSync | null = null;
 			store = createAgxStore({
 				dir: profileDir(profileName),
 				store: messages,
 				allowed,
-				persistAllow: (next) => {
-					updateProfile(profileName, { allow: next });
+				loadAllow,
+				changeAllow: (hex, on) => {
+					const current = getProfile(profileName).allow.filter((entry) => toHexPubkey(entry, "allowlist entry") !== hex);
+					updateProfile(profileName, { allow: on ? [...current, hex] : current });
 				},
 				sync: async () => {
 					pull ??= await createAgxSync({
@@ -84,6 +94,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 						identity,
 						store: messages,
 						allowed,
+						beforePull: refreshAllowed,
 						verbose: options.verbose ?? false,
 					});
 					return pull.sync();
@@ -205,7 +216,9 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 		} else {
 			info("Opening your browser. If nothing opens, run `agx ui --no-open` to print the one-time link. Press Ctrl-C to stop.");
 			json({ ok: true, port: server.port });
-			launchFile = openBrowserWithToken(server.url);
+			launchFile = openBrowserWithToken(server.url, () => {
+				warn("Could not open a browser. Run `agx ui --no-open` and open the link it prints.");
+			});
 		}
 		// Keep the process alive until shutdown.
 		await new Promise<void>(() => undefined);
@@ -316,7 +329,7 @@ function safeMessage(error: unknown): string {
  * Open the browser without putting the one-time token in argv (visible to `ps`) or on stdout:
  * a private 0600 page that redirects to the link. It is removed after a minute and on exit.
  */
-function openBrowserWithToken(url: string): string | null {
+function openBrowserWithToken(url: string, onFailure: () => void): string | null {
 	const file = join(tmpdir(), `agx-ui-${randomBytes(8).toString("hex")}.html`);
 	try {
 		writeFileSync(
@@ -325,6 +338,7 @@ function openBrowserWithToken(url: string): string | null {
 			{ mode: 0o600 },
 		);
 	} catch {
+		onFailure();
 		return null;
 	}
 	const [command, args] =
@@ -335,10 +349,15 @@ function openBrowserWithToken(url: string): string | null {
 				: ["xdg-open", [file]];
 	try {
 		const child = spawn(command as string, args as string[], { stdio: "ignore", detached: true });
-		child.on("error", () => undefined);
+		child.on("error", onFailure);
+		child.on("exit", (code) => {
+			if (code !== 0) {
+				onFailure();
+			}
+		});
 		child.unref();
 	} catch {
-		// Without a browser the user runs `agx ui --no-open`.
+		onFailure();
 	}
 	setTimeout(() => rmSync(file, { force: true }), 60_000).unref();
 	return file;

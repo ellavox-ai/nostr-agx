@@ -25,6 +25,8 @@ export async function createAgxSync(options: {
 	identity: Identity;
 	store: MessageStore;
 	allowed: ReadonlySet<string>;
+	/** Run before each pull, to refresh `allowed` from the profile. */
+	beforePull?: () => void;
 	verbose: boolean;
 }): Promise<AgxSync> {
 	const logger = makeLogger(options.verbose);
@@ -40,7 +42,9 @@ export async function createAgxSync(options: {
 		startCursor: state.cursor,
 		// No capability is served, so nothing is authorized to run.
 		authorize: () => false,
-		onMessage: (msg) => collector.onMessage(msg),
+		onMessage: (msg) => {
+			collector.onMessage(msg);
+		},
 		onReceipt: (receipt) => collector.onReceipt(receipt),
 	});
 	await client.start({ pollIntervalMs: 0, advertise: false });
@@ -53,6 +57,8 @@ export async function createAgxSync(options: {
 			if (!pulling) {
 				pulling = true;
 				try {
+					options.beforePull?.();
+					options.store.absorbSpool();
 					const result = await client.pump();
 					if (result.complete) {
 						cursor = result.cursor;

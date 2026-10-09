@@ -498,7 +498,7 @@ program
 	.option("--compose <draft.json>", "load a draft {to, body, subject?, contextId?} into Compose; never sends by itself")
 	.option("--drafts <dir>", "list draft files from this folder (default: ./.elladex/drafts if it exists)")
 	.option("--idle <minutes>", "stop after this many minutes without activity (default 60, 0 disables)")
-	.option("--dev-store <file>", "use a sample JSON store; until agx inbox ships")
+	.addOption(new Option("--dev-store <file>", "sample JSON store for tests").hideHelp())
 	.option("-v, --verbose")
 	.action((options) => uiCommand(withGlobals(options)));
 
