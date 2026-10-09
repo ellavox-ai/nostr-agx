@@ -2,8 +2,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getCredential } from "../lib/credentials.js";
+import { setRuntimeForTests } from "../lib/runtime.js";
 import { setStdinForTests } from "../lib/stdin.js";
-import { agx, capture, jsonDocuments, sandbox } from "../test/helpers.js";
+import { agx, type CliRun, capture, jsonDocuments, sandbox } from "../test/helpers.js";
 import { startMockIndexServer } from "../test/mock-index-server.js";
 
 const KEY = "ela_ManualKeyManualKeyManualKeyManualKeyWXYZ";
@@ -22,6 +23,26 @@ async function withStdin<T>(input: string | null, fn: () => Promise<T>): Promise
 	} finally {
 		restore();
 	}
+}
+
+/** Run `fn` recording every URL agx requests; each request fails as offline. */
+async function recordingRequests<T>(fn: () => Promise<T>): Promise<{ result: T; urls: string[] }> {
+	const urls: string[] = [];
+	const restore = setRuntimeForTests({
+		fetch: async (input) => {
+			urls.push(input instanceof Request ? input.url : String(input));
+			throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+		},
+	});
+	try {
+		return { result: await fn(), urls };
+	} finally {
+		restore();
+	}
+}
+
+function storeKey(key = KEY): Promise<CliRun> {
+	return withStdin(key, () => agx("config", "set", "apiKey", "--stdin"));
 }
 
 describe("agx config set apiKey", () => {
@@ -70,6 +91,72 @@ describe("agx config set apiKey", () => {
 		expect(run.code).toBe(0);
 		expect(readFileSync(join(box.home, "config.json"), "utf8")).not.toContain("ela_OLD");
 		expect(getCredential("default")?.apiKey).toBe(KEY);
+	});
+});
+
+describe("agx config set apiKey: looking up the key's id", () => {
+	beforeEach(() => {
+		delete process.env.AGX_API_URL;
+	});
+
+	it("a key stored before apiBaseUrl is set (the 0.3 order) is sent nowhere, and stored without an id", async () => {
+		const { result: run, urls } = await recordingRequests(() => storeKey());
+		expect(run.code, run.stderr).toBe(0);
+		expect(run.stderr).toBe("");
+		expect(urls).toEqual([]);
+		expect(getCredential("default")).toMatchObject({
+			apiKey: KEY,
+			apiKeyId: null,
+			apiBaseUrl: "https://app.ellaworks.ai",
+		});
+	});
+
+	it("nor when config.json stores the default only because another setting wrote the profile", async () => {
+		expect((await agx("config", "set", "orgSlug", "acme")).code).toBe(0);
+		expect(readFileSync(join(box.home, "config.json"), "utf8")).toContain('"apiBaseUrl": "https://app.ellaworks.ai"');
+		const { result: run, urls } = await recordingRequests(() => storeKey());
+		expect(run.code, run.stderr).toBe(0);
+		expect(urls).toEqual([]);
+		expect(getCredential("default")?.apiKeyId).toBeNull();
+	});
+
+	it("nor when a 0.3 profile still stores the 0.3 default, http://localhost:3000", async () => {
+		writeFileSync(
+			join(box.home, "config.json"),
+			JSON.stringify({
+				version: 1,
+				currentProfile: "default",
+				profiles: { default: { apiBaseUrl: "http://localhost:3000", orgSlug: "acme" } },
+			}),
+		);
+		const { result: run, urls } = await recordingRequests(() => storeKey());
+		expect(run.code, run.stderr).toBe(0);
+		expect(urls).toEqual([]);
+		expect(getCredential("default")).toMatchObject({ apiKeyId: null, apiBaseUrl: "http://localhost:3000" });
+	});
+
+	it("a profile pointed at a server first asks that server once, and records the id", async () => {
+		const mock = await startMockIndexServer();
+		try {
+			const settingsKey = mock.addKey();
+			expect((await agx("config", "set", "apiBaseUrl", mock.origin)).code).toBe(0);
+			const run = await storeKey(settingsKey.key);
+			expect(run.code, run.stderr).toBe(0);
+			expect(run.stderr).toBe("");
+			expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
+			expect(mock.calls("/api/rpc/account/principal/get")[0]?.headers["x-api-key"]).toBe(settingsKey.key);
+			expect(getCredential("default")).toMatchObject({ apiKey: settingsKey.key, apiKeyId: settingsKey.id });
+		} finally {
+			await mock.close();
+		}
+	});
+
+	it("AGX_API_URL is a choice, even when it names the default server", async () => {
+		process.env.AGX_API_URL = "https://app.ellaworks.ai";
+		const { result: run, urls } = await recordingRequests(() => storeKey());
+		expect(run.code, run.stderr).toBe(0);
+		expect(urls).toEqual(["https://app.ellaworks.ai/api/rpc/account/principal/get"]);
+		expect(getCredential("default")?.apiKeyId).toBeNull();
 	});
 });
 
@@ -211,8 +298,11 @@ describe("agx config set apiBaseUrl", () => {
 		const mock = await startMockIndexServer();
 		try {
 			const settingsKey = mock.addKey();
-			// The 0.3 order: key first (bound to the default server), then the URL.
-			expect((await withStdin(settingsKey.key, () => agx("config", "set", "apiKey", "--stdin"))).code).toBe(0);
+			// The 0.3 order: key first (bound to the default server, and sent
+			// nowhere), then the URL.
+			const first = await recordingRequests(() => storeKey(settingsKey.key));
+			expect(first.result.code).toBe(0);
+			expect(first.urls).toEqual([]);
 			const setBase = await agx("config", "set", "apiBaseUrl", mock.origin);
 			expect(setBase.code).toBe(0);
 			expect(setBase.stderr).toMatch(/belongs to https:\/\/app\.ellaworks\.ai/);

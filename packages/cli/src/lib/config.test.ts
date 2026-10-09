@@ -18,6 +18,7 @@ vi.mock("./api.js", async (importOriginal) => {
 
 const { searchCommand } = await import("../commands/search.js");
 const {
+	apiBaseUrlWasChosen,
 	assertApiBaseUrl,
 	DEFAULT_API_BASE_URL,
 	getProfile,
@@ -169,6 +170,34 @@ describe("assertApiBaseUrl", () => {
 		} catch (error) {
 			expect(String((error as Error).message)).not.toContain("hunter2");
 		}
+	});
+});
+
+describe("apiBaseUrlWasChosen", () => {
+	it("a profile that names no server, or stores a built-in default, chose none", () => {
+		expect(apiBaseUrlWasChosen("fresh")).toBe(false);
+		for (const stored of [
+			"https://app.ellaworks.ai",
+			"https://app.ellaworks.ai/",
+			"https://APP.ellaworks.ai",
+			"http://localhost:3000",
+			"http://localhost:3000/",
+		]) {
+			updateProfile("default", { apiBaseUrl: stored });
+			expect(apiBaseUrlWasChosen("default"), stored).toBe(false);
+		}
+	});
+
+	it("any other stored origin was chosen, and AGX_API_URL always is", () => {
+		updateProfile("default", { apiBaseUrl: "https://staging.example.com" });
+		expect(apiBaseUrlWasChosen("default")).toBe(true);
+		updateProfile("default", { apiBaseUrl: "http://localhost:4000" });
+		expect(apiBaseUrlWasChosen("default")).toBe(true);
+
+		updateProfile("default", { apiBaseUrl: DEFAULT_API_BASE_URL });
+		process.env.AGX_API_URL = DEFAULT_API_BASE_URL;
+		expect(apiBaseUrlWasChosen("default")).toBe(true);
+		expect(apiBaseUrlWasChosen("fresh")).toBe(true);
 	});
 });
 

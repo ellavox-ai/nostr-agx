@@ -133,12 +133,15 @@ printf %s "$AGX_KEY" | agx config set apiKey --stdin
 ```
 
 It is stored as a `manual` credential, bound to the server the profile points
-at **when you store it**, so set `apiBaseUrl` before the key: storing it also
-asks that server, once, which key it is, and records the key's id so `agx
+at **when you store it**, so set `apiBaseUrl` before the key. If you chose that
+server (`AGX_API_URL`, or an `apiBaseUrl` other than the default), storing the
+key also asks it, once, which key it is, and records the key's id so `agx
 logout` can revoke it later (best effort: offline or refused, the key is stored
-all the same, and a refusal is reported on stderr). A script written for agx 0.3
-that sets the key first binds it to `https://app.ellaworks.ai`, and every API
-command then stops with exit 3; pipe the key in again after setting
+all the same, and a refusal is reported on stderr). On the default server agx
+asks nothing at that point, and `agx logout` looks the id up instead. A script
+written for agx 0.3 that sets the key first therefore sends it nowhere: the key
+is bound to `https://app.ellaworks.ai`, and once `apiBaseUrl` points elsewhere
+every API command stops with exit 3; pipe the key in again after setting
 `apiBaseUrl` (agx never rebinds a key by itself). Passing
 the key as an argument still works but prints a deprecation warning. `agx
 logout` revokes a `manual` key too; a key from agx 0.3 is only forgotten, and

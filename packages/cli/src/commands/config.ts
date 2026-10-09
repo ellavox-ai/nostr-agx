@@ -4,6 +4,7 @@ import {
 	toCliError,
 } from "../lib/api.js";
 import {
+	apiBaseUrlWasChosen,
 	assertApiBaseUrl,
 	assertSettableKey,
 	coerceSettableValue,
@@ -171,6 +172,14 @@ async function setApiKey(
 
 	// The key is stored whatever happens next. Recording its id now means a
 	// later `agx logout` can revoke it without asking the server who it is.
+	// Only a server someone chose is asked. A key piped in before `apiBaseUrl`
+	// is set (the agx 0.3 order) is bound to the default server, which may not
+	// be the one that issued it. Nothing sends it there until the person runs
+	// an API command, and this lookup must not either; `agx logout` asks for
+	// the id instead.
+	if (!apiBaseUrlWasChosen(profileName)) {
+		return;
+	}
 	const apiKeyId = await lookUpKeyId(origin, key);
 	if (apiKeyId && getCredential(profileName)?.apiKey === key) {
 		setCredential(profileName, { ...entry, apiKeyId });

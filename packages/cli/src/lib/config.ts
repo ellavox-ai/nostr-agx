@@ -304,6 +304,26 @@ export function effectiveApiBaseUrl(profileName: string): {
 }
 
 /**
+ * Whether someone chose the server {@link effectiveApiBaseUrl} names:
+ * `AGX_API_URL` is set, or the profile stores an `apiBaseUrl` on another
+ * origin than a built-in default. A stored default says nothing either way:
+ * config.json records {@link DEFAULT_API_BASE_URL} the first time anything
+ * writes the profile, and every 0.3 profile stored
+ * {@link LEGACY_DEFAULT_API_BASE_URL} without anyone choosing it.
+ */
+export function apiBaseUrlWasChosen(profileName: string): boolean {
+	if (process.env.AGX_API_URL) {
+		return true;
+	}
+	const origin = originOf(getProfile(profileName).apiBaseUrl);
+	return (
+		origin !== null &&
+		origin !== originOf(DEFAULT_API_BASE_URL) &&
+		origin !== originOf(LEGACY_DEFAULT_API_BASE_URL)
+	);
+}
+
+/**
  * The extra way out for a key that was stored by hand (`manual`) or moved out
  * of a 0.3 `config.json` (`migrated`): such a key is bound to whatever server
  * the profile named when it was stored, so a Settings key stored BEFORE

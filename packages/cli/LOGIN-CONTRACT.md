@@ -207,8 +207,8 @@ How agx uses it:
   - `organization: null` for an API key: agx says that the key's owner is no longer a member of its organization, and exits 4. Under `--json` it prints the document first, with `verified: true` and `organization: null`; it never substitutes the organization it remembers from the login.
   - A 404 with no `data.code` means a server without this procedure: agx prints its own local record with `verified: false` and exits 0.
 - **`agx login`** calls it to confirm a stored login before answering "already logged in" (§1.8). If the server refuses the key (any exit-4 error), answers 404, or answers `organization: null`, agx requests a new code instead.
-- **`agx config set apiKey`** calls it once, best effort, after storing the key, and records `apiKey.id` with it, so a later `agx logout` need not ask. The call has a 10-second limit. If the server cannot be reached, does not answer in time, answers 404, refuses the key or names no id, the key stays stored without an id and the command still exits 0. A refusal and `organization: null` each get a notice on stderr.
-- **`agx logout`** calls it to learn `apiKey.id` for a key stored without one: by `agx config set apiKey` when that lookup failed, or by an earlier agx (§1.6).
+- **`agx config set apiKey`** calls it once, best effort, after storing the key, and records `apiKey.id` with it, so a later `agx logout` need not ask. It calls it only for a server someone chose: `AGX_API_URL` is set, or the profile's `apiBaseUrl` is on another origin than agx's defaults (`https://app.ellaworks.ai`, and the 0.3 default `http://localhost:3000`). A key stored for a default origin may have been piped in before `apiBaseUrl` was set and belong to another server, so it is sent nowhere until it is used, and it is stored without an id. The call has a 10-second limit. If the server cannot be reached, does not answer in time, answers 404, refuses the key or names no id, the key stays stored without an id and the command still exits 0. A refusal and `organization: null` each get a notice on stderr.
+- **`agx logout`** calls it to learn `apiKey.id` for a key stored without one: by `agx config set apiKey` when that lookup was skipped or failed, or by an earlier agx (§1.6).
 
 ### 1.6 `organizations.list` and `prm.apiKeys.delete` (self-revoke)
 
@@ -228,7 +228,7 @@ How agx uses it:
 - Output: `{ "success": true }`.
 - After success, the next call with that key gets 401 `API_KEY_INVALID`.
 
-**What `agx logout` does with it.** It revokes the profile's key on the server, then forgets it locally. The call goes to the origin the key was issued for, never to whatever the profile currently points at. When the profile has no recorded id for the key (a key stored with `agx config set apiKey` whose lookup failed, §1.5), agx asks `account.principal.get` for it first; that still works after the key's owner has left the key's organization.
+**What `agx logout` does with it.** It revokes the profile's key on the server, then forgets it locally. The call goes to the origin the key was issued for, never to whatever the profile currently points at. When the profile has no recorded id for the key (a key stored with `agx config set apiKey` whose lookup was skipped or failed, §1.5), agx asks `account.principal.get` for it first; that still works after the key's owner has left the key's organization.
 
 `agx logout --json` prints `{"loggedOut":[{"profile","revoked","reason"}]}`, with one row per profile (`--all` covers every profile). `reason` is one of:
 
