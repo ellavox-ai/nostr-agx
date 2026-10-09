@@ -8,7 +8,10 @@ import {
 	MAX_NEW_SENDERS_PER_HOUR,
 	MESSAGES_FILE,
 	MessageStore,
-	SPOOL_FILE,
+	SPOOL_DIR,
+	HELD_TTL_MS,
+	MAX_HELD_TEXT_CHARS,
+	MAX_HELD_TOTAL_BYTES,
 } from "./message-store";
 import type { NewMessage } from "./types";
 
@@ -264,52 +267,161 @@ describe("delivery receipts", () => {
 	});
 });
 
-describe("outbound spool", () => {
+describe("the spool", () => {
 	const sent = { id: "out1", peer: BOB, subject: "S", contextId: "ctx-1", text: "sent text", at: "2026-10-07T10:00:00.000Z", deliveryStatus: "sent" };
+	const spoolFiles = (): string[] => (existsSync(join(dir, SPOOL_DIR)) ? readdirSync(join(dir, SPOOL_DIR)) : []);
+
+	it("writes one private file per change and no temporary file", () => {
+		MessageStore.spoolOutbound(dir, sent);
+		MessageStore.spoolOutbound(dir, { ...sent, id: "out2" });
+		const files = spoolFiles();
+		expect(files).toHaveLength(2);
+		expect(files.every((f) => f.endsWith(".json"))).toBe(true);
+		expect(statSync(join(dir, SPOOL_DIR, files[0] as string)).mode & 0o777).toBe(0o600);
+	});
 
 	it("lets a reader see a sent message without changing any file", () => {
 		MessageStore.spoolOutbound(dir, sent);
-		expect(statSync(join(dir, SPOOL_FILE)).mode & 0o777).toBe(0o600);
 		const reader = open();
 		expect(reader.listMessages({ direction: "out" }).map((m) => m.text)).toEqual(["sent text"]);
 		reader.flush();
 		expect(existsSync(join(dir, MESSAGES_FILE))).toBe(false);
-		expect(existsSync(join(dir, SPOOL_FILE))).toBe(true);
+		expect(spoolFiles()).toHaveLength(1);
 	});
 
-	it("is taken over by the writer, written to the history, then removed", () => {
+	it("is applied by the writer, written to the history, then removed", () => {
 		MessageStore.spoolOutbound(dir, sent);
 		MessageStore.spoolOutbound(dir, { ...sent, id: "out2", at: "2026-10-07T10:01:00.000Z" });
 		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
 		expect(writer.listMessages({ direction: "out" })).toHaveLength(2);
-		expect(existsSync(join(dir, SPOOL_FILE))).toBe(false);
+		expect(spoolFiles()).toHaveLength(2);
 		writer.flush();
-		expect(readdirSync(dir).filter((f) => f.startsWith("outbox"))).toEqual([]);
+		expect(spoolFiles()).toEqual([]);
 		expect(open().listMessages({ direction: "out" })).toHaveLength(2);
 	});
 
-	it("keeps a send that lands after the writer took over", () => {
+	it("keeps a send that lands while the writer is working, for the next flush", () => {
 		MessageStore.spoolOutbound(dir, sent);
 		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
 		MessageStore.spoolOutbound(dir, { ...sent, id: "late", at: "2026-10-07T10:02:00.000Z" });
 		writer.flush();
+		expect(spoolFiles()).toHaveLength(1);
+		expect(open().listMessages({ direction: "out" }).map((m) => m.id)).toEqual(["out1", "late"]);
+		const next = new MessageStore(dir, () => clock, { claimSpool: true });
+		next.flush();
+		expect(spoolFiles()).toEqual([]);
 		expect(open().listMessages({ direction: "out" }).map((m) => m.id)).toEqual(["out1", "late"]);
 	});
 
-	it("re-reads a claimed file left by a crash and does not duplicate", () => {
+	it("applies a file left by a crash once, without duplicating", () => {
 		MessageStore.spoolOutbound(dir, sent);
 		new MessageStore(dir, () => clock, { claimSpool: true });
-		expect(readdirSync(dir).some((f) => f.startsWith("outbox.claimed."))).toBe(true);
 		const next = new MessageStore(dir, () => clock, { claimSpool: true });
 		next.flush();
-		const ids = open().listMessages({ direction: "out" }).map((m) => m.id);
-		expect(ids).toEqual(["out1"]);
-		expect(readdirSync(dir).filter((f) => f.startsWith("outbox"))).toEqual([]);
+		expect(open().listMessages({ direction: "out" }).map((m) => m.id)).toEqual(["out1"]);
+		expect(spoolFiles()).toEqual([]);
 	});
 
-	it("ignores a torn spool line", () => {
+	it("skips a spool file that is not valid and leaves it in place", () => {
 		MessageStore.spoolOutbound(dir, sent);
-		writeFileSync(join(dir, SPOOL_FILE), `${readFileSync(join(dir, SPOOL_FILE), "utf8")}{"id":"torn"\n`);
+		writeFileSync(join(dir, SPOOL_DIR, "000-bad.json"), "{not json");
+		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
+		writer.flush();
 		expect(open().listMessages({ direction: "out" })).toHaveLength(1);
+		expect(spoolFiles()).toEqual(["000-bad.json"]);
+	});
+
+	it("queues a held decision and a mark-read for the lock holder", () => {
+		const first = open();
+		first.hold(MALLORY, msg({ id: "h1", peer: MALLORY, contextId: "ctx-2" }));
+		first.addInbound(msg({ id: "in1" }));
+		first.flush();
+		MessageStore.spool(dir, { kind: "decision", action: "allow", npub: MALLORY });
+		MessageStore.spool(dir, { kind: "read", contextId: "ctx-1" });
+		const reader = open();
+		expect(reader.listHeld()).toEqual([]);
+		expect(reader.listMessages({ unreadOnly: true }).map((m) => m.id)).toEqual(["h1"]);
+		const writer = new MessageStore(dir, () => clock, { claimSpool: true });
+		writer.flush();
+		expect(spoolFiles()).toEqual([]);
+		const after = open();
+		expect(after.listMessages({ unreadOnly: true }).map((m) => m.id)).toEqual(["h1"]);
+		expect(after.listHeld()).toEqual([]);
+		expect(after.listMessages().map((m) => m.id).sort()).toEqual(["h1", "in1"]);
+	});
+
+	it("queues a block", () => {
+		MessageStore.spool(dir, { kind: "decision", action: "block", npub: MALLORY });
+		new MessageStore(dir, () => clock, { claimSpool: true }).flush();
+		expect(open().heldStatus(MALLORY)).toBe("blocked");
+	});
+});
+
+describe("held limits", () => {
+	it("cuts one very long held message", () => {
+		const store = open();
+		store.hold(MALLORY, msg({ id: "big", peer: MALLORY, text: "x".repeat(MAX_HELD_TEXT_CHARS * 3) }));
+		const kept = store.listHeld()[0]?.messages[0]?.text ?? "";
+		expect(kept.length).toBeLessThan(MAX_HELD_TEXT_CHARS + 20);
+		expect(kept.endsWith("[cut off]")).toBe(true);
+	});
+
+	it("drops the oldest held text when the total is too large, and keeps the count", () => {
+		const store = open();
+		const chunk = "😀".repeat(MAX_HELD_TEXT_CHARS / 2);
+		let n = 0;
+		for (let sender = 0; sender < MAX_NEW_SENDERS_PER_HOUR; sender += 1) {
+			const peer = `npub1sender${sender}`;
+			for (let i = 0; i < MAX_HELD_PER_SENDER; i += 1) {
+				n += 1;
+				store.hold(peer, msg({ id: `m${n}`, peer, text: chunk, at: new Date(Date.UTC(2026, 9, 7, 10, 0, 0, n)).toISOString() }));
+			}
+		}
+		const bytes = store.listHeld().flatMap((h) => h.messages).reduce((sum, m) => sum + Buffer.byteLength(m.text), 0);
+		expect(bytes).toBeLessThanOrEqual(MAX_HELD_TOTAL_BYTES);
+		expect(store.listHeld().reduce((sum, h) => sum + h.count, 0)).toBe(n);
+		const ids = store.listHeld().flatMap((h) => h.messages.map((m) => m.id));
+		expect(ids).not.toContain("m1");
+		expect(ids).toContain(`m${n}`);
+	});
+
+	it("drops held text past its age limit when the store opens", () => {
+		const store = open();
+		store.hold(MALLORY, msg({ id: "old", peer: MALLORY, at: new Date(clock.getTime() - HELD_TTL_MS - 1000).toISOString() }));
+		store.hold(MALLORY, msg({ id: "new", peer: MALLORY, at: clock.toISOString() }));
+		store.flush();
+		const later = open();
+		const sender = later.listHeld()[0];
+		expect(sender?.messages.map((m) => m.id)).toEqual(["new"]);
+		expect(sender?.count).toBe(2);
+	});
+});
+
+describe("records from a newer version", () => {
+	it("keeps a line this version cannot read, and extra fields, when it rewrites a file", () => {
+		const first = open();
+		first.addInbound(msg({ id: "in1" }));
+		first.flush();
+		const path = join(dir, MESSAGES_FILE);
+		const future = JSON.stringify({ id: "x1", direction: "sideways", kind: "reaction" });
+		const known = JSON.parse(readFileSync(path, "utf8").trim()) as Record<string, unknown>;
+		writeFileSync(path, `${JSON.stringify({ ...known, pinned: true })}\n${future}\ntorn{\n`);
+		const store = open();
+		store.markRead({ ids: ["in1"] });
+		store.flush();
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		expect(lines).toHaveLength(2);
+		expect(JSON.parse(lines[0] as string)).toMatchObject({ id: "in1", pinned: true });
+		expect(lines[1]).toBe(future);
+	});
+
+	it("keeps an unknown held record as written", () => {
+		const path = join(dir, HELD_FILE);
+		const future = JSON.stringify({ npub: MALLORY, status: "muted", firstSeenAt: "2026-10-07T10:00:00.000Z", count: 1, messages: [] });
+		writeFileSync(path, `${future}\n`);
+		const store = open();
+		store.hold(BOB, msg({ id: "h1" }));
+		store.flush();
+		expect(readFileSync(path, "utf8")).toContain(future);
 	});
 });

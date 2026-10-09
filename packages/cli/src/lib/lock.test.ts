@@ -3,7 +3,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgxCliError, EXIT } from "./errors";
-import { acquireLock, LOCK_HEARTBEAT_MS, LOCK_STALE_MS } from "./lock";
+import { acquireLock, clearAbandoned, LOCK_HEARTBEAT_MS, LOCK_STALE_MS } from "./lock";
 import { ensureDir, lockPath, profileDir } from "./paths";
 
 let home: string;
@@ -121,13 +121,59 @@ describe("acquireLock", () => {
 
 		it("does not touch a lock that now belongs to someone else, and does not remove it", () => {
 			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-			const release = acquireLock("p");
+			const release = acquireLock("p", undefined, () => undefined);
 			writeLock({ pid: process.ppid, host: hostname(), token: "other" });
 			age(30);
 			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS * 2);
 			expect(Date.now() - statSync(lockPath("p")).mtimeMs).toBeGreaterThan(20_000);
 			release();
 			expect(existsSync(lockPath("p"))).toBe(true);
+		});
+	});
+
+	describe("losing the lock", () => {
+		it("calls onLost when another process holds it after a heartbeat tick and a second look", () => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+			const onLost = vi.fn();
+			const release = acquireLock("p", undefined, onLost);
+			writeLock({ pid: process.ppid, host: hostname(), token: "other" });
+			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS);
+			expect(onLost).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(250);
+			expect(onLost).toHaveBeenCalledTimes(1);
+			release();
+		});
+
+		it("does not call onLost when the file was only out for a moment", () => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+			const onLost = vi.fn();
+			const release = acquireLock("p", undefined, onLost);
+			const text = readFileSync(lockPath("p"), "utf8");
+			rmSync(lockPath("p"));
+			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS);
+			writeFileSync(lockPath("p"), text);
+			vi.advanceTimersByTime(250);
+			expect(onLost).not.toHaveBeenCalled();
+			release();
+		});
+	});
+
+	describe("clearing an abandoned lock", () => {
+		it("removes the record it judged", () => {
+			const judged = { pid: 2147483646, host: hostname(), token: "old" };
+			writeLock(judged);
+			clearAbandoned(lockPath("p"), judged);
+			expect(existsSync(lockPath("p"))).toBe(false);
+			expect(readdirSync(profileDir("p")).filter((f) => f.includes(".stale."))).toEqual([]);
+		});
+
+		it("puts back a fresh lock that a faster process took in the meantime", () => {
+			const judged = { pid: 2147483646, host: hostname(), token: "old" };
+			const fresh = { pid: process.ppid, host: hostname(), token: "fresh" };
+			writeLock(fresh);
+			clearAbandoned(lockPath("p"), judged);
+			expect(JSON.parse(readFileSync(lockPath("p"), "utf8")).token).toBe("fresh");
+			expect(readdirSync(profileDir("p")).filter((f) => f.includes(".stale."))).toEqual([]);
 		});
 	});
 

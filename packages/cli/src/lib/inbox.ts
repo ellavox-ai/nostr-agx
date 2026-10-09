@@ -5,7 +5,7 @@ import { neutralizeControls } from "./inbound-lines.js";
 import { shortNpub } from "./output.js";
 import { toDisplayNpub } from "./peer.js";
 import type { MessageStore } from "./store/message-store.js";
-import type { StoredMessage } from "./store/types.js";
+import type { HoldResult, StoredMessage } from "./store/types.js";
 import { renderMessageLines } from "./threads.js";
 
 export const INBOX_SCHEMA = "agx.inbox/1";
@@ -94,7 +94,7 @@ export function createCollector(options: {
 	const heldNow = new Set<string>();
 	const receipts: InboxReceipt[] = [];
 
-	function sort(msg: AgxIncomingMessage): void {
+	function sort(msg: AgxIncomingMessage): HoldResult | "stored" {
 		const peer = toDisplayNpub(msg.from);
 		const input = {
 			id: msg.eventId,
@@ -111,18 +111,20 @@ export function createCollector(options: {
 					stored.push(saved);
 				}
 			}
-			return;
+			return "stored";
 		}
 		const result = options.store.hold(peer, input);
 		if (result === "kept" || result === "capped") {
 			heldNow.add(peer);
 		}
+		return result;
 	}
 
 	return {
-		onMessage(msg: AgxIncomingMessage): void {
+		/** What became of the message: stored, or the outcome of holding it. */
+		onMessage(msg: AgxIncomingMessage): HoldResult | "stored" {
 			try {
-				sort(msg);
+				return sort(msg);
 			} catch (error) {
 				options.onError?.(error, msg);
 				throw error;

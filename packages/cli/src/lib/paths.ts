@@ -1,6 +1,9 @@
 import {
 	chmodSync,
+	closeSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	renameSync,
 	statSync,
 	writeFileSync,
@@ -72,6 +75,13 @@ export function writePrivateText(path: string, text: string): void {
 	const tmp = `${path}.tmp`;
 	writeFileSync(tmp, text, { mode: 0o600 });
 	chmodSync(tmp, 0o600);
+	// On disk before the rename, so a power loss never leaves an empty file where data was.
+	const fd = openSync(tmp, "r");
+	try {
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
 	renameSync(tmp, path);
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, linkSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { AgxCliError, EXIT, type ExitCode } from "./errors.js";
 import { ensureDir, lockPath, profileDir } from "./paths.js";
@@ -8,6 +8,9 @@ import { ensureDir, lockPath, profileDir } from "./paths.js";
 export const LOCK_HEARTBEAT_MS = 10_000;
 /** ...and a lock from another host counts as abandoned after this long without a refresh. */
 export const LOCK_STALE_MS = 60_000;
+
+/** Another live process holds the profile lock. */
+export class LockHeldError extends AgxCliError {}
 
 interface LockRecord {
 	pid: number;
@@ -61,10 +64,48 @@ function heldByLiveOwner(path: string, record: LockRecord | null): boolean {
 	}
 }
 
-/** Per-profile single-writer lock shared by `agx serve`, `agx inbox` and `agx ui`. */
+function sameRecord(a: LockRecord | null, b: LockRecord | null): boolean {
+	return a === null || b === null ? a === b : a.pid === b.pid && a.host === b.host && a.token === b.token;
+}
+
+/**
+ * Remove a lock we judged abandoned. The rename is atomic, so only one process
+ * gets the file; it then checks that it is still the record it judged. If a faster
+ * process already took the lock and we grabbed that fresh one, we put it back.
+ */
+export function clearAbandoned(path: string, judged: LockRecord | null): void {
+	const trash = `${path}.stale.${process.pid}.${randomUUID().slice(0, 8)}`;
+	try {
+		renameSync(path, trash);
+	} catch {
+		return;
+	}
+	try {
+		if (!sameRecord(judged, readRecord(trash))) {
+			try {
+				linkSync(trash, path);
+			} catch {
+				// Someone else holds it now; the holder we displaced finds out on its next heartbeat.
+			}
+		}
+	} finally {
+		rmSync(trash, { force: true });
+	}
+}
+
+function lostLock(): never {
+	process.stderr.write("agx: lost the profile lock to another process; stopping so two writers do not overwrite each other.\n");
+	process.exit(EXIT.generic);
+}
+
+/**
+ * Per-profile single-writer lock shared by `agx serve`, `agx inbox` and `agx ui`.
+ * `onLost` runs if another process ends up holding the lock; the default exits.
+ */
 export function acquireLock(
 	profile: string,
 	exitCode: ExitCode = EXIT.config,
+	onLost: () => void = lostLock,
 ): () => void {
 	const path = lockPath(profile);
 	ensureDir(profileDir(profile));
@@ -77,7 +118,10 @@ export function acquireLock(
 			try {
 				// A hard link is created whole or not at all, so no one ever sees a half-written lock.
 				linkSync(mine, path);
-				return startHeartbeat(path, token);
+				// A clearer that judged an older record may have removed this link already.
+				if (readRecord(path)?.token === token) {
+					return startHeartbeat(path, token, onLost);
+				}
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
 					throw error;
@@ -85,7 +129,7 @@ export function acquireLock(
 			}
 			const holder = existsSync(path) ? readRecord(path) : null;
 			if (holder !== null && heldByLiveOwner(path, holder)) {
-				throw new AgxCliError(
+				throw new LockHeldError(
 					`Another \`agx serve\`, \`agx inbox\` or \`agx ui\` is already running for profile "${profile}" (pid ${holder.pid}${holder.host && holder.host !== hostname() ? ` on ${holder.host}` : ""}).`,
 					{
 						exitCode,
@@ -95,7 +139,7 @@ export function acquireLock(
 				);
 			}
 			// Abandoned: a crashed run, an empty file, or an old life of this pid.
-			rmSync(path, { force: true });
+			clearAbandoned(path, holder);
 		}
 		throw new AgxCliError(`Could not take the lock for profile "${profile}".`, { exitCode });
 	} finally {
@@ -103,12 +147,30 @@ export function acquireLock(
 	}
 }
 
+/** Like `acquireLock`, but returns null instead of throwing when a live process holds it. */
+export function tryAcquireLock(profile: string, onLost?: () => void): (() => void) | null {
+	try {
+		return acquireLock(profile, EXIT.generic, onLost);
+	} catch (error) {
+		if (error instanceof LockHeldError) {
+			return null;
+		}
+		throw error;
+	}
+}
+
 /** Keep the lock fresh for hosts that cannot see our pid; the returned function releases it. */
-function startHeartbeat(path: string, token: string): () => void {
+function startHeartbeat(path: string, token: string, onLost: () => void): () => void {
 	const ours = (): boolean => readRecord(path)?.token === token;
 	const timer = setInterval(() => {
 		if (!ours()) {
 			clearInterval(timer);
+			// A clearer may have the file out for a moment; look again before giving up.
+			setTimeout(() => {
+				if (!ours()) {
+					onLost();
+				}
+			}, 200).unref();
 			return;
 		}
 		try {

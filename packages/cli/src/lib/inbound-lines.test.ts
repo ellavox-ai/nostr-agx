@@ -121,6 +121,16 @@ describe("--allowed-only", () => {
 		expect(joined).not.toContain("attacker-chosen-ctx");
 	});
 
+	it.each([
+		["capped", "not kept: this sender is at the limit of kept messages"],
+		["rate-limited", "not kept: too many new senders this hour"],
+		["suppressed", "not kept: you ignored or blocked this sender"],
+	] as const)("does not say a %s message was kept", (held, phrase) => {
+		const [line] = renderInboundLines(view({ fromNpub: MALLORY, allowed: false, allowedOnly: true, held }));
+		expect(line).toContain(phrase);
+		expect(line).not.toContain("kept for your decision");
+	});
+
 	it("prints the full npub on HOLD even without --full-ids", () => {
 		const [line] = renderInboundLines(
 			view({ fromNpub: MALLORY, allowed: false, allowedOnly: true }),

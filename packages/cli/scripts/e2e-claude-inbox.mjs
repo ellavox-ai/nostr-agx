@@ -17,7 +17,7 @@
  *   pnpm build && pnpm --filter @nostr-agx/cli test:e2e
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -922,10 +922,41 @@ async function main() {
 	if (!readerView.stdout.includes(`SENT  to ${dave}`) || !readerView.stdout.includes(`${INDENT}CAROL-REPLY-7`)) {
 		fail("the sent message is not in the thread while serve runs", readerView.stdout);
 	}
+	// ------------------------------------------------------------- (q2)
+	step("q2) held decisions and mark-read work while serve runs");
+	const ivan = await makeProfile("ivan");
+	await send("ivan", carol, "IVAN-BODY-9", []);
+	await waitFor(() => holder.stdout.includes(ivan) || holder.exited, 15_000, "the watch to print ivan's HOLD line");
+	if (holder.stdout.includes("IVAN-BODY-9") || !holder.stdout.includes(`from ${ivan} \u2014 not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow ${ivan}`)) {
+		fail("the watch's HOLD line is wrong or leaked ivan's text", holder.stdout);
+	}
+	const queuedAllow = lastJson((await agxOk(["--profile", "carol", "--json", "held", "allow", ivan])).stdout);
+	if (queuedAllow.queued !== true) {
+		fail("held allow while serve runs did not queue", JSON.stringify(queuedAllow));
+	}
+	await agxOk(["--profile", "carol", "thread", "e2e-inbox-1", "--mark-read", "--no-color"]);
+	let heldLeft = 1;
+	for (let i = 0; i < 100 && heldLeft > 0; i += 1) {
+		heldLeft = lastJson((await agxOk(["--profile", "carol", "--json", "held", "list"])).stdout).held.length;
+		await sleep(150);
+	}
+	if (heldLeft > 0) {
+		fail("the running serve did not apply the queued allow within 15s");
+	}
+	pass("held allow and thread --mark-read were accepted and applied by the running serve");
+
 	await stop(holder);
 	const afterStop = await agxOk(["--profile", "carol", "--json", "thread", "e2e-inbox-1"]);
-	if (!afterStop.stdout.includes("CAROL-REPLY-7") || existsSync(join(home, "profiles", "carol", "outbox.jsonl"))) {
+	if (!afterStop.stdout.includes("CAROL-REPLY-7") || existsSync(join(home, "profiles", "carol", "spool.d")) && readdirSync(join(home, "profiles", "carol", "spool.d")).length > 0) {
 		fail("the sent message was not written to the history, or the spool is left over", afterStop.stdout);
+	}
+	const ivanInbox = await agxOk(["--profile", "carol", "inbox", "--unread", "--wait", "3", "--full-ids", "--no-color"]);
+	if (!ivanInbox.stdout.includes("IVAN-BODY-9")) {
+		fail("ivan's kept text was not released into the inbox by the running serve", ivanInbox.stdout);
+	}
+	const threadsAfter = lastJson((await agxOk(["--profile", "carol", "--json", "threads"])).stdout);
+	if (threadsAfter.threads.find((t) => t.contextId === "e2e-inbox-1")?.unread !== 0) {
+		fail("thread --mark-read queued while serve ran was not applied", JSON.stringify(threadsAfter));
 	}
 	pass("SENT line while serve runs, and written to the history after it stops");
 

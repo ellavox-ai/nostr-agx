@@ -13,4 +13,8 @@
 ### Changed
 
 - `agx serve` now keeps what it receives: allowed senders into the history, everyone else as held with their text. What it prints is unchanged except the `HOLD` line, which no longer says the text is not kept: it points to `agx held allow | ignore | block`.
-- The profile lock is shared by `serve` and `inbox`, and its message names both.
+- The profile lock is shared by `serve` and `inbox`, and its message names both. Taking over an abandoned lock is race-free (rename, re-check, put back), and a process that finds another holds the lock stops instead of writing.
+- `agx held allow|ignore|block` and `agx thread --mark-read` work while `agx serve` runs: the allowlist changes at once and the rest is queued in `spool.d/` for the running `serve`, which also reloads the allowlist on every poll. `agx send` uses the same queue, one file per change, so a send can no longer be lost. `held` decisions print `queued` in `--json`.
+- Held text is bounded: 8,000 characters per message, 8 MiB in all (oldest first) and 30 days. The `HOLD` line says when a message was not kept (limit, rate limit, ignored or blocked sender).
+- `serve` applies queued sends before each poll, so a receipt that arrives with the next poll finds its message.
+- Records a newer version wrote are kept when the files are rewritten, and files are synced to disk before they replace the old ones.

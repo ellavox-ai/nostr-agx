@@ -1,5 +1,6 @@
 import kleur from "kleur";
 import { shortNpub } from "./output.js";
+import type { HoldResult } from "./store/types.js";
 
 /**
  * How `agx serve` prints an inbound plain message. Pure, so the one piece of
@@ -35,13 +36,29 @@ export interface InboundMessageView {
 	allowedOnly: boolean;
 	/** Print the full npub and contextId instead of the scannable short forms. */
 	fullIds: boolean;
+	/** What the store did with a withheld message; "kept" when not given. */
+	held?: HoldResult | "stored";
+}
+
+const DECIDE = (npub: string): string => `agx held allow ${npub} (or: agx held ignore | agx held block)`;
+
+function holdLine(npub: string, held: HoldResult | "stored"): string {
+	const head = `${kleur.yellow("HOLD ")} from ${npub} — not on the allowlist; text withheld here and`;
+	switch (held) {
+		case "capped":
+			return `${head} not kept: this sender is at the limit of kept messages. To read what is kept: ${DECIDE(npub)}`;
+		case "rate-limited":
+			return `${head} not kept: too many new senders this hour. To allow this one: ${DECIDE(npub)}`;
+		case "suppressed":
+			return `${head} not kept: you ignored or blocked this sender. To change that: agx held allow ${npub}`;
+		default:
+			return `${head} kept for your decision. To read it: ${DECIDE(npub)}`;
+	}
 }
 
 export function renderInboundLines(view: InboundMessageView): string[] {
 	if (view.allowedOnly && !view.allowed) {
-		return [
-			`${kleur.yellow("HOLD ")} from ${view.fromNpub} — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow ${view.fromNpub} (or: agx held ignore | agx held block)`,
-		];
+		return [holdLine(view.fromNpub, view.held ?? "kept")];
 	}
 	const from = view.fullIds ? view.fromNpub : shortNpub(view.fromNpub);
 	const subject = view.subject
