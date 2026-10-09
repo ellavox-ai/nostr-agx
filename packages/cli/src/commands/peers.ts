@@ -1,10 +1,6 @@
 import { createApiClient, toCliError } from "../lib/api.js";
-import {
-	effectiveProfile,
-	requireApiCredentials,
-	resolveProfileName,
-} from "../lib/config.js";
-import { usageError } from "../lib/errors.js";
+import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
+import { AgxCliError, usageError } from "../lib/errors.js";
 import { heading, info, json, kv, ok, say, table } from "../lib/output.js";
 import { toDisplayNpub } from "../lib/peer.js";
 
@@ -30,11 +26,7 @@ export interface PeerOptions {
 
 function ctx(options: PeerOptions) {
 	const profileName = resolveProfileName(options.profile);
-	const profile = effectiveProfile(profileName);
-	const creds = requireApiCredentials(
-		options.org ? { ...profile, orgSlug: options.org } : profile,
-		profileName,
-	);
+	const creds = resolveApiCredentials(profileName, { org: options.org });
 	if (!options.team) {
 		throw usageError(
 			"--team is required.",
@@ -62,7 +54,7 @@ export async function peersListCommand(options: PeerOptions): Promise<void> {
 			teamId,
 		});
 	} catch (error) {
-		throw toCliError(error, "listPeers", creds.baseUrl);
+		throw peersError(error, "listPeers", creds.baseUrl);
 	}
 	heading(`exchange peers for team ${teamId}`);
 	table(
@@ -101,7 +93,7 @@ export async function peersAllowlistCommand(
 			...(options.name ? { displayName: options.name } : {}),
 		});
 	} catch (error) {
-		throw toCliError(error, "allowlistPeer", creds.baseUrl);
+		throw peersError(error, "allowlistPeer", creds.baseUrl);
 	}
 	ok(
 		`${toDisplayNpub(result.pubkey)} is now "${result.status}" for this team.`,
@@ -146,7 +138,7 @@ export async function peersDecideCommand(
 			...(options.reason ? { reason: options.reason } : {}),
 		});
 	} catch (error) {
-		throw toCliError(error, procedure, creds.baseUrl);
+		throw peersError(error, procedure, creds.baseUrl);
 	}
 	ok(`Peer is now "${result.status}".`);
 	if (result.delivered !== undefined) {
@@ -156,4 +148,29 @@ export async function peersDecideCommand(
 		);
 	}
 	json(result);
+}
+
+/**
+ * A key from `agx login` covers Elladex listings and domains only; the
+ * exchange procedures answer it with INSUFFICIENT_SCOPE. Say plainly what
+ * works instead of the generic scope message.
+ */
+function peersError(
+	error: unknown,
+	procedure: string,
+	baseUrl: string,
+): AgxCliError {
+	const cli = toCliError(error, procedure, baseUrl);
+	const code = (error as { data?: { code?: unknown } })?.data?.code;
+	if (code !== "INSUFFICIENT_SCOPE") {
+		return cli;
+	}
+	return new AgxCliError(
+		`${procedure}: \`agx peers\` manages a team's exchange trust, which a key from \`agx login\` does not cover (it covers Elladex listings and domains only).`,
+		{
+			exitCode: cli.exitCode,
+			remediation:
+				"Mint a key in Settings → API keys and use it from its own profile:\n    printf %s \"$KEY\" | agx --profile exchange config set apiKey --stdin\n    agx --profile exchange peers list --team <teamId>",
+		},
+	);
 }

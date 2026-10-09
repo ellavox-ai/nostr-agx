@@ -3,10 +3,15 @@ import kleur from "kleur";
 import { createApiClient, toCliError } from "../lib/api.js";
 import {
 	effectiveProfile,
-	requireApiCredentials,
+	resolveApiCredentials,
 	resolveProfileName,
 } from "../lib/config.js";
-import { usageError } from "../lib/errors.js";
+import {
+	AgxCliError,
+	EXIT,
+	HumanActionRequiredError,
+	usageError,
+} from "../lib/errors.js";
 import { loadIdentityFile } from "../lib/identity.js";
 import {
 	heading,
@@ -20,7 +25,13 @@ import {
 	warn,
 } from "../lib/output.js";
 import { relaysForListing } from "../lib/relays.js";
+import { runtime } from "../lib/runtime.js";
 import { loadState, updateState } from "../lib/state.js";
+import {
+	announceActionRequired,
+	parseDuration,
+	WAIT_POLL_MS,
+} from "../lib/wait.js";
 
 export interface ListingOptions {
 	profile?: string;
@@ -45,7 +56,13 @@ export interface ListingOptions {
 	domainId?: string;
 	/** `listing create --pubkey` only: the relays that key listens on. */
 	relay?: string[];
+	/** `listing publish` only: wait for a human to confirm a public listing. */
+	wait?: boolean;
+	timeout?: string;
 }
+
+/** How long `listing publish --wait` waits for a human by default. */
+const DEFAULT_PUBLISH_WAIT = "30m";
 
 interface PublicListing {
 	id: string;
@@ -73,11 +90,8 @@ function titleCase(slug: string): string {
 
 function ctx(options: ListingOptions) {
 	const profileName = resolveProfileName(options.profile);
+	const creds = resolveApiCredentials(profileName, { org: options.org });
 	const profile = effectiveProfile(profileName);
-	const creds = requireApiCredentials(
-		options.org ? { ...profile, orgSlug: options.org } : profile,
-		profileName,
-	);
 	return { profileName, profile, creds, client: createApiClient(creds) };
 }
 
@@ -330,7 +344,13 @@ export async function listingPublishCommand(
 ): Promise<void> {
 	const { profileName, creds, client } = ctx(options);
 	const id = resolveListingId(listingId, profileName);
+	const timeoutMs = options.wait
+		? parseDuration(options.timeout ?? DEFAULT_PUBLISH_WAIT)
+		: 0;
 
+	// PATCH, then POST, as in 0.3: when a server gates "going public" on a
+	// human, the PATCH stages the visibility and the human's one Publish click
+	// finishes the job.
 	if (options.visibility) {
 		try {
 			await client.agentIndex.updateListing({
@@ -340,7 +360,12 @@ export async function listingPublishCommand(
 			});
 			ok(`Visibility set to "${options.visibility}".`);
 		} catch (error) {
-			throw toCliError(error, "updateListing", creds.baseUrl);
+			const cli = toCliError(error, "updateListing", creds.baseUrl);
+			if (options.wait && cli instanceof HumanActionRequiredError) {
+				await waitUntilPublic(client, creds.orgSlug, id, cli, timeoutMs);
+				return;
+			}
+			throw cli;
 		}
 	}
 
@@ -354,7 +379,12 @@ export async function listingPublishCommand(
 			listingId: id,
 		});
 	} catch (error) {
-		throw toCliError(error, "publishListing", creds.baseUrl);
+		const cli = toCliError(error, "publishListing", creds.baseUrl);
+		if (options.wait && cli instanceof HumanActionRequiredError) {
+			await waitUntilPublic(client, creds.orgSlug, id, cli, timeoutMs);
+			return;
+		}
+		throw cli;
 	}
 
 	ok(`Listing is now "${result.listing.status}".`);
@@ -390,6 +420,53 @@ export async function listingPublishCommand(
 		say(kleur.dim("  agx listing set-visibility public"));
 	}
 	json(result);
+}
+
+/**
+ * `listing publish --wait` after the server asked for a human: say so once,
+ * then read the listing every 15 s until it is listed and public. Running out
+ * of time is still exit 7: the human has not acted yet.
+ */
+async function waitUntilPublic(
+	client: ReturnType<typeof createApiClient>,
+	orgSlug: string,
+	listingId: string,
+	pending: HumanActionRequiredError,
+	timeoutMs: number,
+): Promise<void> {
+	const rt = runtime();
+	announceActionRequired(
+		pending.actionRequired,
+		"An organization admin has to confirm this listing in the browser before it goes public:",
+	);
+	const deadline = rt.now() + timeoutMs;
+	for (;;) {
+		const remaining = deadline - rt.now();
+		if (remaining <= 0) {
+			throw pending;
+		}
+		await rt.sleep(Math.min(WAIT_POLL_MS, remaining));
+		let listing: PublicListing;
+		try {
+			({ listing } = (await client.agentIndex.getListing({
+				orgSlug,
+				listingId,
+			})) as { listing: PublicListing });
+		} catch (error) {
+			const cli = toCliError(error, "getListing");
+			if (cli instanceof AgxCliError && cli.exitCode === EXIT.network) {
+				continue; // a blip while waiting is not a reason to give up
+			}
+			throw cli;
+		}
+		if (listing.status === "listed" && listing.visibility === "public") {
+			ok("The listing is public and listed.");
+			kv("visibility", listing.visibility);
+			kv("capabilities", listing.capabilities.join(", ") || "—");
+			json({ listing, confirmed: true });
+			return;
+		}
+	}
 }
 
 export async function listingSetVisibilityCommand(

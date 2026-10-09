@@ -1,9 +1,9 @@
 import { toNpub } from "@nostr-agx/nostr";
 import kleur from "kleur";
-import { createApiClient, toCliError } from "../lib/api.js";
+import { type AgxApiClient, createApiClient, toCliError } from "../lib/api.js";
 import {
 	effectiveProfile,
-	requireApiCredentials,
+	resolveApiCredentials,
 	resolveProfileName,
 } from "../lib/config.js";
 import { AgxCliError, EXIT, usageError } from "../lib/errors.js";
@@ -49,14 +49,15 @@ function titleCase(slug: string): string {
  *
  * Without a recorded proof, `createListing` refuses with 403 — which is the whole
  * point of the control, and what `--skip-proof` exists to demonstrate.
+ *
+ * Idempotent: when this organization already owns a listing for this key, a
+ * re-run reports it instead of burning a challenge and failing with 409. A
+ * 409 that names this organization's own live listing is resumed the same way.
  */
 export async function registerCommand(options: RegisterOptions): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
+	const creds = resolveApiCredentials(profileName, { org: options.org });
 	const profile = effectiveProfile(profileName);
-	const creds = requireApiCredentials(
-		options.org ? { ...profile, orgSlug: options.org } : profile,
-		profileName,
-	);
 	const identity = loadIdentity(profileName);
 	const client = createApiClient(creds);
 
@@ -84,6 +85,23 @@ export async function registerCommand(options: RegisterOptions): Promise<void> {
 	const totalSteps = options.skipProof ? 2 : 4;
 
 	heading(`registering ${npub} in org "${creds.orgSlug}"`);
+
+	const existingId = await ownedListingId(
+		client,
+		creds.orgSlug,
+		npub,
+		creds.baseUrl,
+	);
+	if (existingId) {
+		await reportExisting(
+			client,
+			creds.orgSlug,
+			existingId,
+			profileName,
+			creds.baseUrl,
+		);
+		return;
+	}
 
 	// After the heading: `relaysForListing` warns as a side effect, and with a
 	// stock profile (`ws://127.0.0.1:7447`) those warnings would otherwise open
@@ -174,6 +192,23 @@ export async function registerCommand(options: RegisterOptions): Promise<void> {
 			...(relays.length > 0 ? { relays } : {}),
 		});
 	} catch (error) {
+		const data = (error as { data?: { code?: unknown; listingId?: unknown } })
+			?.data;
+		if (
+			data?.code === "LISTING_ADDRESS_LIVE" &&
+			typeof data.listingId === "string"
+		) {
+			// Live in THIS organization (the server only names the listing when
+			// it is ours): a previous run got this far. Resume it.
+			await reportExisting(
+				client,
+				creds.orgSlug,
+				data.listingId,
+				profileName,
+				creds.baseUrl,
+			);
+			return;
+		}
 		throw toCliError(error, "createListing", creds.baseUrl);
 	}
 
@@ -205,3 +240,81 @@ export async function registerCommand(options: RegisterOptions): Promise<void> {
 }
 
 export const REGISTER_EXIT_HINT = EXIT.remote;
+
+/**
+ * The id of this organization's own listing for `npub`, or null. A NOT_FOUND
+ * (no listing, or a server that predates the lookup) means "register it".
+ */
+async function ownedListingId(
+	client: AgxApiClient,
+	orgSlug: string,
+	npub: string,
+	baseUrl: string,
+): Promise<string | null> {
+	try {
+		const owned = (await client.agentIndex.getOwnedListingByAddress({
+			orgSlug,
+			address: npub,
+		})) as { listingId?: string } | null;
+		return owned?.listingId ?? null;
+	} catch (error) {
+		const err = error as {
+			status?: number;
+			code?: string;
+			data?: { code?: unknown };
+		};
+		if (
+			(err?.status === 404 || err?.code === "NOT_FOUND") &&
+			typeof err?.data?.code !== "string"
+		) {
+			return null;
+		}
+		throw toCliError(error, "getOwnedListingByAddress", baseUrl);
+	}
+}
+
+async function reportExisting(
+	client: AgxApiClient,
+	orgSlug: string,
+	listingId: string,
+	profileName: string,
+	baseUrl: string,
+): Promise<void> {
+	let result: {
+		listing: {
+			id: string;
+			slug: string;
+			status: string;
+			visibility: string;
+			npub: string;
+			relays?: string[];
+			capabilities: string[];
+		};
+	};
+	try {
+		result = await client.agentIndex.getListing({ orgSlug, listingId });
+	} catch (error) {
+		throw toCliError(error, "getListing", baseUrl);
+	}
+	const listing = result.listing;
+	updateState(profileName, {
+		listingId: listing.id,
+		listingSlug: listing.slug,
+	});
+	ok(
+		"This key is already registered in this organization; nothing was created.",
+	);
+	kv("id", listing.id);
+	kv("slug", listing.slug);
+	kv("status", listing.status);
+	kv("visibility", listing.visibility);
+	kv("npub", listing.npub);
+	kv("capabilities", listing.capabilities.join(", ") || "—");
+	say("");
+	info(
+		listing.status === "listed"
+			? `Change it with:  agx listing set-visibility <level> ${listing.id}`
+			: `Publish it with:  agx listing publish ${listing.id}`,
+	);
+	json({ listing, resumed: true });
+}

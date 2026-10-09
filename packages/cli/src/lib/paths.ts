@@ -1,8 +1,11 @@
+import { randomBytes } from "node:crypto";
 import {
 	chmodSync,
 	mkdirSync,
 	renameSync,
+	rmSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -18,10 +21,16 @@ import { dirname, join } from "node:path";
  *     every poll; a torn write there would strand the inbox.
  *
  *   ~/.agx/
- *     config.json                    profiles: API base, key, org, relays, allowlist
- *     profiles/<name>/identity.json  the secret key
- *     profiles/<name>/state.json     cursor + listing id
- *     profiles/<name>/seen.json      replay-protection ids
+ *     config.json                         profiles: API base, org, relays, allowlist
+ *                                         (never a key since 0.4; a 0.3 key is
+ *                                         migrated out on the next write)
+ *     credentials.json                    API keys, one per profile, each bound
+ *                                         to the one origin it may be sent to
+ *     profiles/<name>/identity.json       the secret key
+ *     profiles/<name>/state.json          cursor + listing id
+ *     profiles/<name>/seen.json           replay-protection ids
+ *     profiles/<name>/pending-login.json  an `agx login` waiting for approval
+ *     profiles/<name>/pending-login.lock  held by the one process polling it
  */
 
 export function agxHome(): string {
@@ -30,6 +39,10 @@ export function agxHome(): string {
 
 export function configPath(): string {
 	return join(agxHome(), "config.json");
+}
+
+export function credentialsPath(): string {
+	return join(agxHome(), "credentials.json");
 }
 
 export function profileDir(profile: string): string {
@@ -52,6 +65,14 @@ export function lockPath(profile: string): string {
 	return join(profileDir(profile), "serve.lock");
 }
 
+export function pendingLoginPath(profile: string): string {
+	return join(profileDir(profile), "pending-login.json");
+}
+
+export function pendingLoginLockPath(profile: string): string {
+	return join(profileDir(profile), "pending-login.lock");
+}
+
 export function ensureDir(dir: string): void {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	try {
@@ -61,13 +82,39 @@ export function ensureDir(dir: string): void {
 	}
 }
 
-/** Atomic, private write. Used for every file under `~/.agx`. */
+/**
+ * Atomic, private write. Used for every file under `~/.agx`.
+ *
+ * The temp name is unique per write, so two processes writing the same file
+ * (two `agx login` runs finishing together) never share, and tear, one temp
+ * file. A failed write removes its temp file rather than leaving it behind.
+ */
 export function writePrivateJson(path: string, value: unknown): void {
 	ensureDir(dirname(path));
-	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-	chmodSync(tmp, 0o600);
-	renameSync(tmp, path);
+	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
+			mode: 0o600,
+		});
+		chmodSync(tmp, 0o600);
+		renameSync(tmp, path);
+	} catch (error) {
+		rmSync(tmp, { force: true });
+		throw error;
+	}
+}
+
+/** Delete a private file if it exists. Returns whether it was there. */
+export function removePrivateFile(path: string): boolean {
+	try {
+		unlinkSync(path);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return false;
+		}
+		throw error;
+	}
 }
 
 /** Returns the octal permission bits, or null when the file does not exist. */
