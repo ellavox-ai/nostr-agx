@@ -93,7 +93,9 @@ agx login --json --no-wait
 It shows the person that URL and code and, once they say they approved, runs the
 **same command again**. The re-run resumes the same code (saved in
 `pending-login.json`), polls it once, and exits `0` (logged in; the result on
-stdout), `7` (still waiting) or `4` (denied or expired). A `--no-wait` run never
+stdout), `7` (still waiting), `4` (denied, expired, or closed by the server
+because it could not issue a key) or `5` (the server could not be reached or
+failed; the same command resumes the code). A `--no-wait` run never
 replaces a code on its own: after a `4`, running the command once more starts a
 fresh code (exit 7 with a new link). The exception is a code that expired more
 than 24 hours ago, left over from an abandoned session: the next run starts a

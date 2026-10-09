@@ -339,6 +339,87 @@ describe("pollDeviceToken", () => {
 		expect(h.sleeps).toEqual([5000, 10000, 20000, 30000, 30000]);
 	});
 
+	describe("a 500 that closed the code (LOGIN-CONTRACT.md §1.3 row 15)", () => {
+		const closing: Scripted = {
+			status: 500,
+			body: {
+				error: "server_error",
+				error_description:
+					"Could not issue a key for this request, and it cannot be retried. Start the sign-in again",
+			},
+		};
+
+		it("costs one retry after the usual backoff, then exit 4 that says the server closed it", async () => {
+			const persisted: PendingLogin[] = [];
+			const h = harness([closing, oauth("access_denied")]);
+			const error = await exitOf(
+				pollDeviceToken(BASE, pending(), { persist: (p) => persisted.push(p) }, h.deps),
+			);
+			expect(error.exitCode).toBe(EXIT.auth);
+			expect(error.message).toMatch(/could not issue a key for this login and has closed the code/);
+			expect(error.message).not.toMatch(/denied/);
+			expect(error.remediation).toMatch(/same command again for a fresh code/);
+			expect(error.remediation).toMatch(/\n {4}agx login$/);
+			// One retry, after interval·2.
+			expect(h.requests).toHaveLength(2);
+			expect(h.sleeps).toEqual([5000, 10000]);
+			expect(persisted.some((p) => p.lastPollServerError === true)).toBe(true);
+		});
+
+		it("--no-wait: the failed run is exit 5 and records it; the next run reports the closed code", async () => {
+			let saved = pending();
+			const first = harness([closing]);
+			const failed = await exitOf(
+				pollDeviceToken(
+					BASE,
+					saved,
+					{ once: true, rerun: "agx login --no-wait", persist: (p) => { saved = p; } },
+					first.deps,
+				),
+			);
+			expect(failed.exitCode).toBe(EXIT.network);
+			expect(saved.lastPollServerError).toBe(true);
+
+			const second = harness([oauth("access_denied")]);
+			second.advance(first.now() - T0);
+			const closed = await exitOf(
+				pollDeviceToken(BASE, saved, { once: true, rerun: "agx login --no-wait" }, second.deps),
+			);
+			expect(closed.exitCode).toBe(EXIT.auth);
+			expect(closed.message).toMatch(/has closed the code/);
+			expect(closed.remediation).toMatch(/\n {4}agx login --no-wait$/);
+			expect(second.requests).toHaveLength(1);
+		});
+
+		it("a denial after the server has answered normally again is still a denial", async () => {
+			const h = harness([closing, oauth("authorization_pending"), oauth("access_denied")]);
+			const error = await exitOf(pollDeviceToken(BASE, pending(), {}, h.deps));
+			expect(error.exitCode).toBe(EXIT.auth);
+			expect(error.message).toMatch(/denied in the browser/);
+		});
+
+		it("a throttled answer in between does not hide the closed code", async () => {
+			const h = harness([
+				closing,
+				{ status: 429, raw: "<html>Too Many Requests</html>", headers: { "Content-Type": "text/html" } },
+				oauth("access_denied"),
+			]);
+			const error = await exitOf(pollDeviceToken(BASE, pending(), {}, h.deps));
+			expect(error.exitCode).toBe(EXIT.auth);
+			expect(error.message).toMatch(/has closed the code/);
+		});
+
+		it("a 500 that left the code approved is retried and the login completes", async () => {
+			const h = harness([
+				{ status: 500, body: CONTRACT.deviceToken.errors.server_error?.body },
+				success(),
+			]);
+			const outcome = await pollDeviceToken(BASE, pending(), {}, h.deps);
+			expect(outcome.kind).toBe("approved");
+			expect(h.sleeps).toEqual([5000, 10000]);
+		});
+	});
+
 	it("a success resets the failure count", async () => {
 		const h = harness([
 			new TypeError("fetch failed"),

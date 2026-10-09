@@ -248,6 +248,61 @@ describe("agx login", () => {
 		expect(existsSync(credentialsFile())).toBe(false);
 	});
 
+	it("(c) a key the server cannot mint: one retry, then exit 4 that says the code was closed (LOGIN-CONTRACT.md §1.3 row 15)", async () => {
+		mock.onTokenPoll = (_code, n) => {
+			if (n === 1) {
+				mock.approve();
+				mock.failNextMint("closes");
+			}
+		};
+		const run = await agx("login", "--json", "--api-base-url", mock.origin);
+		expect(run.code).toBe(4);
+		expect(run.stderr).toMatch(/could not issue a key for this login and has closed the code/);
+		expect(run.stderr).not.toMatch(/denied in the browser/);
+		expect(run.stderr).toMatch(/^ +agx login$/m);
+		// The 500, then the access_denied that ends it: no loop.
+		expect(mock.calls("/api/auth/device/token")).toHaveLength(2);
+		expect(mock.codes[0]?.status).toBe("denied");
+		expect(existsSync(pendingFile())).toBe(false);
+		expect(existsSync(credentialsFile())).toBe(false);
+		expect(run.stdout).toBe("");
+	});
+
+	it("(c) --no-wait: the failed mint is exit 5, and the next run reports the closed code and removes it", async () => {
+		expect((await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin)).code).toBe(7);
+		mock.approve();
+		mock.failNextMint("closes");
+
+		const failed = await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin);
+		expect(failed.code).toBe(5);
+		expect(existsSync(pendingFile())).toBe(true);
+		expect(readJson(pendingFile()).lastPollServerError).toBe(true);
+
+		const closed = await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin);
+		expect(closed.code).toBe(4);
+		expect(closed.stderr).toMatch(/has closed the code/);
+		expect(closed.stderr).toMatch(/^ +agx login --no-wait$/m);
+		expect(existsSync(pendingFile())).toBe(false);
+		expect(existsSync(credentialsFile())).toBe(false);
+
+		// The run after that starts over with a fresh code.
+		expect((await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin)).code).toBe(7);
+		expect(mock.calls("/api/auth/device/code")).toHaveLength(2);
+	});
+
+	it("(c) a mint failure that leaves the code approved is retried, and the login completes", async () => {
+		mock.onTokenPoll = (_code, n) => {
+			if (n === 1) {
+				mock.approve();
+				mock.failNextMint("retry");
+			}
+		};
+		const run = await agx("login", "--json", "--api-base-url", mock.origin);
+		expect(run.code, run.stderr).toBe(0);
+		expect(mock.calls("/api/auth/device/token")).toHaveLength(2);
+		expect(mock.keys).toHaveLength(1);
+	});
+
 	it("(c) expired → exit 4 and the pending file is removed", async () => {
 		mock.onTokenPoll = (_code, n) => {
 			if (n === 1) {

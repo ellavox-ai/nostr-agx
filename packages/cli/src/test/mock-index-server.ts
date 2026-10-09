@@ -59,6 +59,12 @@ export interface LoggedRequest {
 
 export type CodeStatus = "pending" | "approved" | "denied" | "expired" | "consumed";
 
+export type MintFailure = "closes" | "retry";
+
+/** The row 15 description of a mint failure that closes the code. */
+export const CLOSING_MINT_FAILURE =
+	"Could not issue a key for this request, and it cannot be retried. Start the sign-in again";
+
 export interface Organization {
 	id: string;
 	slug: string;
@@ -116,6 +122,9 @@ export interface MockIndexServer {
 	expire(userCode?: string): CodeRecord;
 	/** Answer the next /token call with this instead of the rules. */
 	queueToken(response: MockResponse): void;
+	/** Fail the next key mint for an approved code (LOGIN-CONTRACT.md §1.3
+	 * row 15): `closes` denies the code, `retry` leaves it approved. */
+	failNextMint(kind: MintFailure): void;
 	/** Answer the next /code call with this instead of the fixture. */
 	queueCode(response: MockResponse): void;
 	/** Called on every /token request before it is answered. */
@@ -223,6 +232,7 @@ export async function startMockIndexServer(
 	const keys: KeyRecord[] = [];
 	const tokenQueue: MockResponse[] = [];
 	const codeQueue: MockResponse[] = [];
+	const mintFailures: MintFailure[] = [];
 	const rpc = new Map<string, RpcHandler>();
 	let tokenPolls = 0;
 	let keySeq = 0;
@@ -335,16 +345,17 @@ export async function startMockIndexServer(
 		if (clientId !== null && !KNOWN_CLIENTS.has(clientId)) {
 			return oauth(400, { error: "invalid_client" });
 		}
-		if (record.clientId !== null) {
-			if (body.grant_type === undefined) {
-				return oauth(400, { error: "invalid_request" });
-			}
-			if (body.grant_type !== GRANT_TYPE) {
-				return oauth(400, { error: "unsupported_grant_type" });
-			}
-			if (clientId !== record.clientId) {
-				return oauth(400, { error: "invalid_grant" });
-			}
+		if (body.grant_type !== undefined && body.grant_type !== GRANT_TYPE) {
+			return oauth(400, { error: "unsupported_grant_type" });
+		}
+		if (record.clientId !== null && body.grant_type === undefined) {
+			return oauth(400, { error: "invalid_request" });
+		}
+		if (clientId !== record.clientId) {
+			return oauth(400, {
+				error: "invalid_grant",
+				error_description: "Device code was issued to another client",
+			});
 		}
 		const t = now();
 		if (t > record.expiresAt && (record.status === "pending" || record.status === "approved")) {
@@ -372,6 +383,18 @@ export async function startMockIndexServer(
 			}
 			record.lastPolledAt = t;
 			return oauth(400, { error: "authorization_pending" });
+		}
+		// Row 15: the key could not be minted.
+		const failure = mintFailures.shift();
+		if (failure === "closes") {
+			record.status = "denied";
+			return oauth(500, {
+				error: "server_error",
+				error_description: CLOSING_MINT_FAILURE,
+			});
+		}
+		if (failure === "retry") {
+			return structuredClone(CONTRACT.deviceToken.errors.server_error as MockResponse);
 		}
 		// approved → consumed, exactly once.
 		record.status = "consumed";
@@ -554,6 +577,9 @@ export async function startMockIndexServer(
 		},
 		queueToken(response) {
 			tokenQueue.push(response);
+		},
+		failNextMint(kind) {
+			mintFailures.push(kind);
 		},
 		queueCode(response) {
 			codeQueue.push(response);

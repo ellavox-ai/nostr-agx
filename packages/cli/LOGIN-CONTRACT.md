@@ -50,7 +50,7 @@ Request fields. All are optional for the server; agx always sends the first thre
 | Field | Type | Rules |
 |---|---|---|
 | `client_id` | string | A client id the server has registered. agx sends `"agx"`. An unknown value is 400 `invalid_client`. Clients that send no `client_id` keep the legacy behaviour (§1.9). |
-| `scope` | string | A space-delimited subset of the scopes the client may ask for; anything else is 400 `invalid_scope`. Defaults to the client's default scopes. Not allowed without a `client_id` (400 `invalid_scope`). agx sends `listings:read listings:write domains:read domains:write`. |
+| `scope` | string | A space-delimited subset of the scopes the client may ask for; anything else is 400 `invalid_scope`. Defaults to the client's default scopes. Not allowed for a client whose keys are unscoped, which includes every request without a `client_id` (400 `invalid_scope`). agx sends `listings:read listings:write domains:read domains:write`. |
 | `host_label` | string | Shown on the approval page as reported by the device, not verified. The server sanitizes it: Unicode NFKC, control and format characters removed, whitespace collapsed and trimmed, at most 64 characters, empty becomes null. agx sends the machine's host name. |
 | `org_hint` | string | Slug of an existing organization to preselect. Must be a well-formed slug of 3 to 32 characters, else 400 `invalid_request`. The server does not look it up here, so the endpoint tells an anonymous caller nothing about which organizations exist. agx sends it for `--org <slug>`. |
 | `new_org` | boolean, or `"true"` / `"false"` | Ask the approver to create a new organization. With `org_hint` it is 400 `invalid_request`. agx sends `true` for `--new-org`. |
@@ -72,8 +72,8 @@ Request fields. All are optional for the server; agx always sends the first thre
 }
 ```
 
-- `scope` is present only when the request carried a `client_id`. It is the scope the key will have.
-- `expires_in` is the code's lifetime in seconds. Elladex uses 1800 for agx.
+- `scope` is present only for a client whose keys are scoped, such as agx. It is the scope the key will have.
+- `expires_in` is the code's lifetime in seconds. Elladex uses 1800 for agx and 900 for other clients.
 - `verification_uri` and `verification_uri_complete` are on the origin the request was sent to.
 
 Errors:
@@ -94,33 +94,37 @@ What agx does with the answer:
 Request fields:
 
 - `device_code`: required.
-- `grant_type`: required when the code was issued to a `client_id`, and must be `urn:ietf:params:oauth:grant-type:device_code`.
-- `client_id`: required when the code was issued to one, and must be the same one.
+- `grant_type`: required when the code was issued to a `client_id`. When sent, it must be `urn:ietf:params:oauth:grant-type:device_code`.
+- `client_id`: required when the code was issued to one, and must be the same one. Not allowed for a code issued without one.
 
-agx always sends all three.
+Each field, when sent, is a string. agx always sends all three.
 
 The server evaluates a request in this order. The first match wins.
 
 | # | Condition | Response |
 |---|---|---|
 | 1 | The caller's IP is over the server's request limit | 400 `slow_down`, with no `interval` |
-| 2 | `device_code` missing | 400 `invalid_request` |
+| 2 | `device_code` missing, or one of the three fields is not a string | 400 `invalid_request` |
 | 3 | No such code | 400 `invalid_grant`, "Invalid device code" |
 | 4 | `client_id` sent but not registered | 400 `invalid_client` |
-| 5 | The code was issued to a `client_id` and: `grant_type` is missing | 400 `invalid_request` |
-|   | … `grant_type` is wrong | 400 `unsupported_grant_type` |
-|   | … `client_id` is missing or different | 400 `invalid_grant` |
+| 5 | `grant_type` sent, and not the device-code grant | 400 `unsupported_grant_type` |
+|   | The code was issued to a `client_id`, and `grant_type` is missing | 400 `invalid_request` |
+|   | `client_id` is not the one the code was issued to: missing, different, or sent for a code issued without one | 400 `invalid_grant`, "Device code was issued to another client" |
 | 6 | The code's lifetime has passed and it is pending or approved | The code becomes expired; 400 `expired_token` |
 | 7 | The code is expired | 400 `expired_token` |
 | 8 | The code was denied | 400 `access_denied` |
 | 9 | The code was already exchanged for a key | 400 `invalid_grant`, "Device code already used" |
-| 10 | Pending, and polled sooner than `interval − 1` s after the previous poll | 400 `{"error":"slow_down","interval":<new>}`. For a registered client the interval grows by 5 s (at most 60) and the new value is returned. |
+| 10 | Pending, and polled sooner than `interval − 1` s after the previous poll | 400 `{"error":"slow_down","interval":<n>}`. For a code issued to `agx` the interval grows by 5 s (at most 60) and the new value is returned. For any other code the current interval is returned unchanged. |
 | 11 | Pending | 400 `authorization_pending` |
 | 12 | Approved, but with no organization (by an approval page that predates this contract) | The code becomes expired; 400 `expired_token`, "Approved by an older page; sign in again" |
-| 13 | Approved, and a concurrent request has just exchanged it | 400 `invalid_grant` |
+|    | … for an organization that has since lost its slug | The code becomes denied; 400 `access_denied`, "The chosen organization has no slug, so a key cannot be issued for it" |
+| 13 | Approved, and a concurrent request has just exchanged it | 400 `invalid_grant`, "Device code already used" |
 | 14 | Approved, but the approver has since lost the organization or the role needed | The code becomes denied; 400 `access_denied`, "The approving account can no longer grant this" |
-| 15 | Approved, but the key could not be issued for any other reason | The code stays approved; 500 `{"error":"server_error","error_description":"Could not issue a key, try again"}`. Never raw error text. |
+| 15 | Approved, but the server refuses the key request built from the code as malformed, which asking again cannot fix | The code becomes denied; 500 `{"error":"server_error","error_description":"Could not issue a key for this request, and it cannot be retried. Start the sign-in again"}`. Every later poll gets `access_denied` (row 8). |
+|    | … or the key could not be issued for any other reason | The code stays approved, so the next poll can try again; 500 `{"error":"server_error","error_description":"Could not issue a key, try again"}` |
 | 16 | Approved | 200, below |
+
+A row 15 answer never carries raw error text.
 
 `200` is the only time the key is ever returned. A second request for the same code gets `invalid_grant` (row 9).
 
@@ -138,7 +142,7 @@ The server evaluates a request in this order. The first match wins.
 ```
 
 - `expires_in` is the key's remaining lifetime in whole seconds; `expires_at` is the same moment as an ISO string. Both are `null` for a key that never expires.
-- For a code issued without a `client_id`, `expires_in` and `expires_at` are `null` and there is no `scope`.
+- For a code issued to a client whose keys are unscoped, which includes every code issued without a `client_id`, `expires_in` and `expires_at` are `null` and there is no `scope`.
 
 **Timing.** `interval` starts at 5 s. A code is single-use and stays valid until its `expires_in` has passed. The server keeps an expired code's record for 24 hours.
 
@@ -147,6 +151,7 @@ What agx does:
 - **Spacing.** It waits at least `interval` between polls, counted from the last poll by any agx process on the profile. After `slow_down` it uses the response's `interval`, or its current interval + 5 s when that field is absent, and never lowers it again for that code (RFC 8628 §3.5).
 - **429, or a body that is not a JSON object,** is treated like `slow_down` (+5 s), and agx also waits out `Retry-After` when present.
 - **5xx or no answer:** it backs off (interval × 2ⁿ, at most 30 s) and gives up with exit 5 after five failures in a row. The code is kept and the same command resumes it. A `--no-wait` run gives up on the first failure.
+- **A 500 that closed the code (row 15)** is retried like any other 5xx, so it costs one more poll after the usual backoff. That poll gets `access_denied` and agx stops with exit 4. Because the poll before it was answered 5xx, agx reports that the server could not issue a key and closed the code, not that someone denied the login. Under `--no-wait` the 500 is exit 5 and the next run is the one that gets `access_denied`: agx records in `pending-login.json` that the last answered poll was a 5xx, so that run reports the same.
 - **3xx:** exit 6. Never followed.
 - **200:** it requires a well-formed `access_token` (§1.1), `token_type`, `api_key_id`, `user.id` and `organization` with `id`, `slug` and `name`. If any is missing or malformed the key is not stored and the run is exit 6, naming the fields and never a value. It records `expires_at`, or else now + `expires_in`, or else no expiry.
 - `authorization_pending`: keep polling. `expired_token`, `access_denied`: exit 4.
@@ -348,7 +353,7 @@ A harness shows the URL, and `userCode` when there is one, to a person. It never
 | State when the run starts | What the run does | Exit |
 |---|---|---|
 | No saved code for this server and request | Requests a code, saves it, does not poll | 7 |
-| A saved code that is still live | Waits out the rest of the interval, polls **once** | 0 approved; 7 still pending; 4 denied, expired or no longer accepted |
+| A saved code that is still live | Waits out the rest of the interval, polls **once** | 0 approved; 7 still pending; 4 denied, expired, closed by the server (§1.3 row 15) or no longer accepted |
 | A saved code that expired within the last 24 hours | Reports that code as expired and removes it. The next run requests a new one. | 4 |
 | A saved code that expired more than 24 hours ago | Discards it and requests a new code, as a first run would | 7 |
 | A saved code for another server or another request | Discards it and requests a new code | 7 |
@@ -410,7 +415,9 @@ Only one agx process polls a code at a time (a lock file beside `pending-login.j
 [`src/test/fixtures/contract-v1.json`](src/test/fixtures/contract-v1.json) holds the JSON bodies of §1.2, §1.3, §1.5, §1.6 and §1.7 as data: each request, each success body and each error with its status.
 
 - **The shapes are the contract:** which keys are present or absent, and the type of each value. The values are this document's examples, placeholders included (`"3f9c…(64 hex)"`).
-- One case is described here and not in the fixture: `account.principal.get` for a key whose owner is no longer a member of the key's organization is `principal.output` with `organization: null` (§1.5). agx's tests build it from that entry.
+- Some cases are described here and have no fixture entry of their own. Each has the shape of an entry that is there, so agx's tests build it from that entry:
+  - `account.principal.get` for a key whose owner is no longer a member of the key's organization is `principal.output` with `organization: null` (§1.5);
+  - the §1.3 answers below differ from an entry only in `error_description`: the wrong-client `invalid_grant` (row 5) has the shape of `deviceToken.errors.invalid_grant`, the no-slug `access_denied` (row 12) that of `approver_lost_access`, and the 500 that closes a code (row 15) that of `server_error`.
 - agx's own tests run against a mock directory server that serves these bodies and applies the §1.3 rules in order.
 - A server implementation can check itself the same way: assert that each of its responses has the shape of the matching fixture entry.
 - A change to the fixture needs a matching change to this document, and the other way round. The fixture's `version` is `1`.

@@ -85,6 +85,11 @@ export const pendingLoginSchema = z.object({
 	/** The login key this code will replace, if any. A credential with any
 	 * other id that appears while the code is pending came from this code. */
 	replacesApiKeyId: z.string().nullable().default(null),
+	/** Whether the last poll the server answered got a 5xx. The server may
+	 * have closed the code with it (LOGIN-CONTRACT.md §1.3 row 15), and then
+	 * the next poll hears `access_denied` although nobody denied anything.
+	 * Kept here so that a `--no-wait` run after the failed one knows. */
+	lastPollServerError: z.boolean().optional(),
 });
 export type PendingLogin = z.infer<typeof pendingLoginSchema>;
 
@@ -430,6 +435,8 @@ function codeExpired(rerun: string): AgxCliError {
  *   honouring `Retry-After`;
  * - 5xx and network failures back off (interval·2ⁿ, at most 30 s) and give up
  *   with exit 5 after five in a row;
+ * - `access_denied` right after a 5xx is a code the server closed because it
+ *   cannot issue a key for it, and is reported as that, not as a denial;
  * - a redirect is refused (exit 6) and never followed.
  */
 export async function pollDeviceToken(
@@ -488,6 +495,10 @@ export async function pollDeviceToken(
 			response = null;
 		}
 
+		if (response !== null && response.status >= 500 && !current.lastPollServerError) {
+			current = { ...current, lastPollServerError: true };
+			save();
+		}
 		if (response === null || response.status >= 500) {
 			failures += 1;
 			if (options.once || failures >= MAX_CONSECUTIVE_FAILURES) {
@@ -553,6 +564,14 @@ export async function pollDeviceToken(
 			return { kind: "approved", token: parsed.data, pending: current };
 		}
 
+		// An answer about the code itself. A 429 or an HTML page above is not
+		// one, so it leaves the record of an earlier 5xx in place.
+		const afterServerError = current.lastPollServerError === true;
+		if (afterServerError) {
+			current = { ...current, lastPollServerError: false };
+			save();
+		}
+
 		const error =
 			typeof response.body.error === "string" ? response.body.error : null;
 		switch (error) {
@@ -580,6 +599,15 @@ export async function pollDeviceToken(
 			case "expired_token":
 				throw codeExpired(rerun);
 			case "access_denied":
+				if (afterServerError) {
+					// LOGIN-CONTRACT.md §1.3 row 15: the server could not mint
+					// a key, will never be able to for this code, and closed
+					// it. Nobody denied the login.
+					throw authError(
+						`${host} could not issue a key for this login and has closed the code. Nothing was stored.`,
+						`Run the same command again for a fresh code:\n    ${rerun}`,
+					);
+				}
 				throw authError(
 					"The login was denied in the browser.",
 					`If that was a mistake, run the same command again for a fresh code:\n    ${rerun}`,
