@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RECENTLY_EXPIRED_MS } from "../commands/login.js";
 import { setRpcTimeoutForTests } from "../lib/api.js";
 import { fileMode } from "../lib/paths.js";
+import { setRuntimeForTests } from "../lib/runtime.js";
 import {
 	agx,
 	type CliRun,
@@ -64,6 +65,29 @@ function onlyJson(run: CliRun): Record<string, any> {
 	const docs = jsonDocuments(run.stdout);
 	expect(docs, `stdout was:\n${run.stdout}\nstderr:\n${run.stderr}`).toHaveLength(1);
 	return docs[0] as Record<string, any>;
+}
+
+/** `printf %s "$KEY" | agx config set apiKey --stdin`, bound to the mock. */
+async function storeManualKey(key: string): Promise<CliRun> {
+	process.env.AGX_API_URL = mock.origin;
+	const { setStdinForTests } = await import("../lib/stdin.js");
+	const restore = setStdinForTests(key);
+	try {
+		return await agx("config", "set", "apiKey", "--stdin");
+	} finally {
+		restore();
+	}
+}
+
+/** Every request fails as on a machine without a network, until restored. */
+function goOffline(): () => void {
+	return setRuntimeForTests({
+		fetch: async () => {
+			throw Object.assign(new TypeError("fetch failed"), {
+				cause: { code: "ECONNREFUSED" },
+			});
+		},
+	});
 }
 
 /** Log in with `--no-wait` twice around an approval. */
@@ -349,6 +373,43 @@ describe("agx login", () => {
 		});
 	});
 
+	it("(e) whoami: a key whose owner left its organization is reported as such, organization null, exit 4", async () => {
+		expect((await loginViaNoWait()).code).toBe(0);
+		const key = mock.keys[0];
+		if (key) {
+			key.member = false;
+		}
+		const run = await agx("whoami", "--json");
+		expect(run.code).toBe(4);
+		// The server's word, not the organization agx remembers from the login.
+		expect(onlyJson(run)).toMatchObject({
+			loggedIn: true,
+			verified: true,
+			source: "login",
+			user: { id: "u_1", email: "a•••@acme.com" },
+			organization: null,
+			apiKey: { id: key?.id, scoped: true },
+		});
+		expect(run.stderr).toMatch(
+			/the account that owns this key is no longer a member of its organization \(acme-robotics\)/,
+		);
+		expect(run.stderr).toMatch(/agx login --force/);
+		expect(`${run.stdout}${run.stderr}`).not.toContain(key?.key);
+
+		const human = await agx("whoami");
+		expect(human.code).toBe(4);
+		expect(human.stdout).toMatch(/organization\s+—/);
+		expect(human.stderr).toMatch(/no longer a member of its organization/);
+	});
+
+	it("(e) whoami against a server that still answers 403 API_KEY_OWNER_NOT_MEMBER exits 4 too", async () => {
+		expect((await loginViaNoWait()).code).toBe(0);
+		mock.setRpc("account/principal/get", () => structuredClone(CONTRACT.rpcErrors.API_KEY_OWNER_NOT_MEMBER as never));
+		const run = await agx("whoami", "--json");
+		expect(run.code).toBe(4);
+		expect(run.stderr).toMatch(/no longer a member of its organization/);
+	});
+
 	it("(f) org list shows a login key only its own organization", async () => {
 		expect((await loginViaNoWait()).code).toBe(0);
 		const run = await agx("org", "list", "--json");
@@ -383,24 +444,113 @@ describe("agx login", () => {
 		expect((await agx("whoami", "--json")).code).toBe(4);
 	});
 
-	it("(g) logout of a manual key asks the server for its id first", async () => {
+	it("(g) config set apiKey records a manual key's id, so logout revokes it without asking again", async () => {
 		const manual = mock.addKey();
-		process.env.AGX_API_URL = mock.origin;
-		const set = await capture(async () => {
-			const { setStdinForTests } = await import("../lib/stdin.js");
-			const restore = setStdinForTests(manual.key);
-			try {
-				return await runCli(["config", "set", "apiKey", "--stdin"]);
-			} finally {
-				restore();
-			}
+		const set = await storeManualKey(manual.key);
+		expect(set.code, set.stderr).toBe(0);
+		expect(set.stderr).toBe("");
+		expect(readJson(credentialsFile()).profiles.default).toMatchObject({
+			source: "manual",
+			apiKey: manual.key,
+			apiKeyId: manual.id,
 		});
-		expect(set.value).toBe(0);
+		expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
+
+		const run = await agx("logout", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		expect(onlyJson(run).loggedOut[0]).toEqual({ profile: "default", revoked: true, reason: "revoked" });
+		expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
+		expect(mock.calls("/api/rpc/prm/apiKeys/delete")[0]?.body).toEqual({ json: { apiKeyId: manual.id } });
+		expect(manual.revoked).toBe(true);
+	});
+
+	it("(g) config set apiKey offline still stores the key, without an id; logout then asks the server for it", async () => {
+		const manual = mock.addKey();
+		const restore = goOffline();
+		let set: CliRun;
+		try {
+			set = await storeManualKey(manual.key);
+		} finally {
+			restore();
+		}
+		expect(set.code, set.stderr).toBe(0);
+		expect(set.stderr).toBe("");
+		expect(readJson(credentialsFile()).profiles.default).toMatchObject({ apiKey: manual.key, apiKeyId: null });
+
 		const run = await agx("logout", "--json");
 		expect(run.code, run.stderr).toBe(0);
 		expect(onlyJson(run).loggedOut[0]).toEqual({ profile: "default", revoked: true, reason: "revoked" });
 		expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
 		expect(manual.revoked).toBe(true);
+	});
+
+	it("(g) config set apiKey: a lookup that never answers is bounded, and the key is stored without an id", async () => {
+		const manual = mock.addKey();
+		mock.setRpc("account/principal/get", () => new Promise(() => {}));
+		const restore = setRpcTimeoutForTests(200);
+		let set: CliRun;
+		try {
+			set = await storeManualKey(manual.key);
+		} finally {
+			restore();
+		}
+		expect(set.code, set.stderr).toBe(0);
+		expect(readJson(credentialsFile()).profiles.default).toMatchObject({ apiKey: manual.key, apiKeyId: null });
+	});
+
+	it("(g) config set apiKey: a key the server refuses is stored all the same, with a notice", async () => {
+		const set = await storeManualKey("ela_NotAKeyTheServerKnows");
+		expect(set.code, set.stderr).toBe(0);
+		expect(set.stderr).toMatch(/refused this key/);
+		expect(set.stderr).toMatch(/agx whoami/);
+		expect(set.stderr).not.toContain("ela_NotAKeyTheServerKnows");
+		expect(readJson(credentialsFile()).profiles.default).toMatchObject({ apiKeyId: null });
+	});
+
+	it("(g) a key whose owner left its organization: config set apiKey still records its id, and logout revokes it", async () => {
+		const manual = mock.addKey({ member: false });
+		const set = await storeManualKey(manual.key);
+		expect(set.code, set.stderr).toBe(0);
+		expect(set.stderr).toMatch(/no longer a member of its organization/);
+		expect(readJson(credentialsFile()).profiles.default.apiKeyId).toBe(manual.id);
+
+		const run = await agx("logout", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		expect(onlyJson(run).loggedOut[0]).toEqual({ profile: "default", revoked: true, reason: "revoked" });
+		expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
+		expect(manual.revoked).toBe(true);
+	});
+
+	it("(g) logout of a manual key stored without its id, whose owner then left its organization, learns the id from whoami and revokes it", async () => {
+		const manual = mock.addKey();
+		const restore = goOffline();
+		try {
+			expect((await storeManualKey(manual.key)).code).toBe(0);
+		} finally {
+			restore();
+		}
+		manual.member = false;
+		const run = await agx("logout", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		expect(onlyJson(run).loggedOut[0]).toEqual({ profile: "default", revoked: true, reason: "revoked" });
+		expect(mock.calls("/api/rpc/account/principal/get")).toHaveLength(1);
+		expect(mock.calls("/api/rpc/prm/apiKeys/delete")[0]?.body).toEqual({ json: { apiKeyId: manual.id } });
+		expect(manual.revoked).toBe(true);
+		expect(readJson(credentialsFile()).profiles.default).toBeUndefined();
+	});
+
+	it("(g) a server that will not let a former member's key revoke itself (403 API_KEY_OWNER_NOT_MEMBER): the key is kept, exit 4", async () => {
+		expect((await loginViaNoWait()).code).toBe(0);
+		const key = mock.keys[0];
+		if (key) {
+			key.member = false;
+		}
+		mock.setRpc("prm/apiKeys/delete", () => structuredClone(CONTRACT.rpcErrors.API_KEY_OWNER_NOT_MEMBER as never));
+		const run = await agx("logout", "--json");
+		expect(run.code).toBe(4);
+		expect(onlyJson(run).loggedOut[0]).toEqual({ profile: "default", revoked: false, reason: "revoke-failed" });
+		expect(run.stderr).toMatch(/Settings/);
+		expect(readJson(credentialsFile()).profiles.default.apiKey).toBe(key?.key);
 	});
 
 	it("(g) logout forgets a key the server no longer knows (401)", async () => {
@@ -425,18 +575,15 @@ describe("agx login", () => {
 
 	it("(g) a 404 is not 'already invalid': a manual key on a server without whoami is kept (exit 6), --local forgets it unrevoked", async () => {
 		const manual = mock.addKey();
-		process.env.AGX_API_URL = mock.origin;
-		const { setStdinForTests } = await import("../lib/stdin.js");
-		const restore = setStdinForTests(manual.key);
-		try {
-			expect((await agx("config", "set", "apiKey", "--stdin")).code).toBe(0);
-		} finally {
-			restore();
-		}
 		mock.setRpc("account/principal/get", () => ({
 			status: 404,
 			body: { json: { defined: false, code: "NOT_FOUND", status: 404, message: "Not found" } },
 		}));
+		const set = await storeManualKey(manual.key);
+		// Storing it does not depend on the lookup, and a 404 is no refusal.
+		expect(set.code, set.stderr).toBe(0);
+		expect(set.stderr).toBe("");
+		expect(readJson(credentialsFile()).profiles.default.apiKeyId).toBeNull();
 		const kept = await agx("logout", "--json");
 		expect(kept.code).toBe(6);
 		expect(onlyJson(kept).loggedOut[0]).toEqual({ profile: "default", revoked: false, reason: "revoke-failed" });
@@ -490,15 +637,10 @@ describe("agx login", () => {
 
 	it("(g) a manual key whose whoami gets a 401 without a data.code is kept too", async () => {
 		const manual = mock.addKey();
-		process.env.AGX_API_URL = mock.origin;
-		const { setStdinForTests } = await import("../lib/stdin.js");
-		const restore = setStdinForTests(manual.key);
-		try {
-			expect((await agx("config", "set", "apiKey", "--stdin")).code).toBe(0);
-		} finally {
-			restore();
-		}
 		mock.setRpc("account/principal/get", () => unauthorizedWithoutCode("Unauthorized"));
+		const set = await storeManualKey(manual.key);
+		expect(set.code, set.stderr).toBe(0);
+		expect(readJson(credentialsFile()).profiles.default.apiKeyId).toBeNull();
 		const run = await agx("logout", "--json");
 		expect(run.code).toBe(4);
 		expect(onlyJson(run).loggedOut[0]).toMatchObject({ reason: "revoke-failed" });
@@ -666,6 +808,25 @@ describe("agx login, more", () => {
 		expect((await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin, "--new-org")).code).toBe(7);
 		expect(mock.calls("/api/auth/device/code")).toHaveLength(2);
 		expect(readJson(pendingFile()).request.newOrg).toBe(true);
+	});
+
+	it("a stored login whose owner left its organization is not 'already logged in': a new code, and the old key is revoked", async () => {
+		expect((await loginViaNoWait()).code).toBe(0);
+		const old = mock.keys[0];
+		if (old) {
+			old.member = false;
+		}
+		const again = await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin);
+		expect(again.code, again.stderr).toBe(7);
+		expect(onlyJson(again).actionRequired.reason).toBe("LOGIN_APPROVAL_REQUIRED");
+		expect(mock.calls("/api/auth/device/code")).toHaveLength(2);
+
+		mock.approve();
+		const done = await agx("login", "--json", "--no-wait", "--api-base-url", mock.origin);
+		expect(done.code, done.stderr).toBe(0);
+		expect(onlyJson(done)).toMatchObject({ alreadyLoggedIn: false, apiKeyId: mock.keys[1]?.id });
+		expect(old?.revoked).toBe(true);
+		expect(readJson(credentialsFile()).profiles.default.apiKeyId).toBe(mock.keys[1]?.id);
 	});
 
 	it("--force logs in again and revokes the replaced login key", async () => {

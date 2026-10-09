@@ -1,6 +1,11 @@
 import { hostname } from "node:os";
 import kleur from "kleur";
-import { createApiClient, isKeyRejected, toCliError } from "../lib/api.js";
+import {
+	BEST_EFFORT_RPC_TIMEOUT_MS,
+	createApiClient,
+	isKeyRejected,
+	toCliError,
+} from "../lib/api.js";
 import { openBrowser, shouldOpenBrowser } from "../lib/browser.js";
 import {
 	assertApiBaseUrl,
@@ -407,7 +412,11 @@ interface PrincipalLike {
 	} | null;
 }
 
-/** The server's view of a stored login, or null when the key no longer works. */
+/**
+ * The server's view of a stored login, or null when the key no longer works:
+ * refused, or (`organization: null`, LOGIN-CONTRACT.md §1.5) owned by an
+ * account that has left the key's organization, so it can act on nothing.
+ */
 async function currentPrincipal(
 	base: string,
 	apiKey: string,
@@ -417,7 +426,10 @@ async function currentPrincipal(
 	}
 	try {
 		const client = createApiClient({ baseUrl: base, apiKey });
-		return (await client.account.principal.get({})) as PrincipalLike;
+		const principal = (await client.account.principal.get(
+			{},
+		)) as PrincipalLike;
+		return principal?.organization ? principal : null;
 	} catch (error) {
 		const mapped = toCliError(error, "account.principal.get", base);
 		if (
@@ -429,10 +441,6 @@ async function currentPrincipal(
 		throw mapped;
 	}
 }
-
-/** The replaced key's revoke is best effort, so it gets a shorter leash than a
- * normal call: it only ever delays the exit (the result is already printed). */
-const REVOKE_TIMEOUT_MS = 10_000;
 
 /**
  * Best effort: revoke the login key this one replaces, against the origin it
@@ -447,7 +455,8 @@ async function revokeReplacedKey(old: CredentialEntry): Promise<void> {
 	try {
 		const client = createApiClient(
 			{ baseUrl: origin, apiKey: old.apiKey },
-			{ timeoutMs: REVOKE_TIMEOUT_MS },
+			// Best effort: it only ever delays the exit (the result is printed).
+			{ timeoutMs: BEST_EFFORT_RPC_TIMEOUT_MS },
 		);
 		await client.prm.apiKeys.delete({ apiKeyId: old.apiKeyId });
 	} catch (error) {

@@ -1,4 +1,8 @@
-import { createApiClient, toCliError } from "../lib/api.js";
+import {
+	createApiClient,
+	OWNER_NOT_MEMBER_REMEDIATION,
+	toCliError,
+} from "../lib/api.js";
 import {
 	getProfile,
 	type ResolvedApiKey,
@@ -6,12 +10,16 @@ import {
 	resolveProfileName,
 } from "../lib/config.js";
 import { getCredential } from "../lib/credentials.js";
-import { authError } from "../lib/errors.js";
+import { AgxCliError, authError, EXIT } from "../lib/errors.js";
 import { heading, json, kv, maskEmail, say, warn } from "../lib/output.js";
 
 /**
  * `agx whoami`: who the stored credential acts as, according to the server
  * (`account.principal.get`, LOGIN-CONTRACT.md §1.5). Never prints the key.
+ *
+ * A key whose owner has left the key's organization is answered with
+ * `organization: null`: whoami prints that (exit 4, after the `--json`
+ * document), never the organization agx remembers from the login.
  */
 
 export interface WhoamiOptions {
@@ -89,6 +97,13 @@ export async function whoamiCommand(options: WhoamiOptions): Promise<void> {
 	}
 
 	const verified = principal !== null;
+	// Once the server has answered, its word on the organization stands: an
+	// API key with `organization: null` belongs to an account that is no
+	// longer a member of the key's organization (LOGIN-CONTRACT.md §1.5).
+	const ownerLeftOrg =
+		principal !== null &&
+		principal.organization === null &&
+		principal.authMethod !== "session";
 	const result = {
 		loggedIn: true,
 		verified,
@@ -103,13 +118,15 @@ export async function whoamiCommand(options: WhoamiOptions): Promise<void> {
 			: entry?.user
 				? { id: entry.user.id, email: maskEmail(entry.user.email) }
 				: null,
-		organization: principal?.organization
-			? {
-					id: principal.organization.id,
-					slug: principal.organization.slug,
-					name: principal.organization.name,
-					role: principal.organization.role ?? null,
-				}
+		organization: principal
+			? principal.organization
+				? {
+						id: principal.organization.id,
+						slug: principal.organization.slug,
+						name: principal.organization.name,
+						role: principal.organization.role ?? null,
+					}
+				: null
 			: entry?.organization
 				? { ...entry.organization, role: null }
 				: null,
@@ -160,4 +177,11 @@ export async function whoamiCommand(options: WhoamiOptions): Promise<void> {
 		);
 	}
 	json(result);
+	if (ownerLeftOrg) {
+		const slug = entry?.organization?.slug;
+		throw new AgxCliError(
+			`Profile "${profileName}": the account that owns this key is no longer a member of its organization${slug ? ` (${slug})` : ""}, so the key cannot act on it.`,
+			{ exitCode: EXIT.auth, remediation: OWNER_NOT_MEMBER_REMEDIATION },
+		);
+	}
 }

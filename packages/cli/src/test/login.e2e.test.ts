@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,5 +128,22 @@ describe.skipIf(!existsSync(AGX))("dist/agx.js login wiring", () => {
 	it("commander's own errors keep their exit status", async () => {
 		expect((await agx("login", "--no-such-flag")).code).toBe(1);
 		expect((await agx("--version")).code).toBe(0);
+	});
+
+	it("config set apiKey records the key's id before exiting; a key whose owner left its organization is exit 4 for whoami", async () => {
+		const manual = mock.addKey();
+		expect((await agx("--profile", "manual", "config", "set", "apiBaseUrl", mock.origin)).code).toBe(0);
+		// A positional key (deprecated, but stdin is not available to this harness).
+		const set = await agx("--profile", "manual", "config", "set", "apiKey", manual.key);
+		expect(set.code, set.stderr).toBe(0);
+		const credentials = JSON.parse(readFileSync(join(home, "credentials.json"), "utf8"));
+		expect(credentials.profiles.manual).toMatchObject({ source: "manual", apiKeyId: manual.id });
+
+		manual.member = false;
+		const who = await agx("whoami", "--json", "--profile", "manual");
+		expect(who.code).toBe(4);
+		expect(JSON.parse(who.stdout)).toMatchObject({ verified: true, organization: null, apiKey: { id: manual.id } });
+		expect(who.stderr).toMatch(/no longer a member of its organization/);
+		expect(`${who.stdout}${who.stderr}`).not.toContain(manual.key);
 	});
 });

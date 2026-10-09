@@ -133,9 +133,12 @@ printf %s "$AGX_KEY" | agx config set apiKey --stdin
 ```
 
 It is stored as a `manual` credential, bound to the server the profile points
-at **when you store it**, so set `apiBaseUrl` before the key. A script written
-for agx 0.3 that sets the key first binds it to `https://app.ellaworks.ai`, and
-every API command then stops with exit 3; pipe the key in again after setting
+at **when you store it**, so set `apiBaseUrl` before the key: storing it also
+asks that server, once, which key it is, and records the key's id so `agx
+logout` can revoke it later (best effort: offline or refused, the key is stored
+all the same, and a refusal is reported on stderr). A script written for agx 0.3
+that sets the key first binds it to `https://app.ellaworks.ai`, and every API
+command then stops with exit 3; pipe the key in again after setting
 `apiBaseUrl` (agx never rebinds a key by itself). Passing
 the key as an argument still works but prints a deprecation warning. `agx
 logout` revokes a `manual` key too; a key from agx 0.3 is only forgotten, and
@@ -148,6 +151,11 @@ be reached (exit 5) or cannot revoke it (for example a 404 from a server without
 self-revoke, exit 6, or any other 401, exit 4), the key is **kept** and the
 error says so; revoke it in Settings, then `agx logout --local` forgets it on
 this machine.
+
+If the account that owns a key leaves the key's organization, the key can no
+longer act on it. `agx whoami` says so and exits 4 (under `--json`,
+`organization` is `null`), `agx login` asks for a new code instead of answering
+"already logged in", and `agx logout` still finds the key's id and revokes it.
 
 ---
 

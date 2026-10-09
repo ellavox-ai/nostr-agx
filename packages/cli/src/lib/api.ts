@@ -57,6 +57,13 @@ export interface ApiTarget {
  */
 export const RPC_TIMEOUT_MS = 30_000;
 
+/**
+ * A best-effort call (revoking a replaced login key, looking up a stored key's
+ * id) gets a shorter leash: nothing depends on its answer, so a slow or dead
+ * server may only delay the exit.
+ */
+export const BEST_EFFORT_RPC_TIMEOUT_MS = 10_000;
+
 let rpcTimeoutOverrideMs: number | null = null;
 
 /** Tests only: every API call times out after `ms`. Returns the restore function. */
@@ -218,6 +225,12 @@ function str(value: unknown): string | null {
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/** What to do about a key whose owner has left the key's organization: the
+ * 403 `API_KEY_OWNER_NOT_MEMBER`, or `organization: null` from
+ * `account.principal.get` (LOGIN-CONTRACT.md §1.5, §1.7). */
+export const OWNER_NOT_MEMBER_REMEDIATION =
+	"Log in with an account that belongs to the organization:\n    agx login --force";
+
 /** The reasons whose fix is a click in a browser (exit 7). */
 const HUMAN_ACTION_CODES: Record<string, ActionRequiredReason> = {
 	HUMAN_CONFIRMATION_REQUIRED: "HUMAN_CONFIRMATION_REQUIRED",
@@ -300,11 +313,7 @@ function fromDataCode(
 		case "API_KEY_OWNER_NOT_MEMBER":
 			return new AgxCliError(
 				`${context}: the account that owns this key is no longer a member of its organization.`,
-				{
-					exitCode: EXIT.auth,
-					remediation:
-						"Log in with an account that belongs to the organization:\n    agx login --force",
-				},
+				{ exitCode: EXIT.auth, remediation: OWNER_NOT_MEMBER_REMEDIATION },
 			);
 		case "API_KEY_RATE_LIMITED": {
 			const ms =

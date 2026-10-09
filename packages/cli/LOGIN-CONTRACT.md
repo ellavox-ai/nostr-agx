@@ -194,18 +194,21 @@ Output for a key issued by `agx login`:
 ```
 
 - A key that was not issued to a registered client with scopes (for example one minted in Settings): `scoped: false`, `scopes: []`, and `clientId`, `hostLabel` and `expiresAt` may be `null`.
+- A key whose owner is no longer a member of the key's organization: still `200`, with `organization: null` and `user` and `apiKey` as above, so the key's id stays known. This is the only case in which an API-key caller gets `organization: null`.
 - A browser-session caller: `authMethod: "session"`, `organization: null`, `apiKey: null`.
 - `emailMasked` is the first character, three bullets (`•••`, always three) and `@domain`.
 - The output never contains the full email address, key material, or the key's raw stored metadata.
-- Errors: 401 with one of the key codes in §1.7; 403 `API_KEY_OWNER_NOT_MEMBER` when the key's owner has left the key's organization.
+- Errors: 401 with one of the key codes in §1.7. A key whose owner has left the key's organization is not an error here (above); `API_KEY_OWNER_NOT_MEMBER` (§1.7) is for the other procedures.
 
 How agx uses it:
 
 - **`agx whoami`** prints this output. With `--json` the document is `{loggedIn, verified, profile, apiBaseUrl, source, user: {id, email}, organization: {id, slug, name, role}, apiKey: {id, name, scoped, scopes, clientId, hostLabel, expiresAt}}`, where `user.email` is the masked address. It never prints the key.
   - With no credential at all it is exit 4, and under `--json` it prints `{"loggedIn": false, "profile": "<name>"}` first.
+  - `organization: null` for an API key: agx says that the key's owner is no longer a member of its organization, and exits 4. Under `--json` it prints the document first, with `verified: true` and `organization: null`; it never substitutes the organization it remembers from the login.
   - A 404 with no `data.code` means a server without this procedure: agx prints its own local record with `verified: false` and exits 0.
-- **`agx login`** calls it to confirm a stored login before answering "already logged in" (§1.8). If the server refuses the key (any exit-4 error) or answers 404, agx requests a new code instead.
-- **`agx logout`** calls it to learn `apiKey.id` for a key stored with `agx config set apiKey`, which does not know its own id (§1.6).
+- **`agx login`** calls it to confirm a stored login before answering "already logged in" (§1.8). If the server refuses the key (any exit-4 error), answers 404, or answers `organization: null`, agx requests a new code instead.
+- **`agx config set apiKey`** calls it once, best effort, after storing the key, and records `apiKey.id` with it, so a later `agx logout` need not ask. The call has a 10-second limit. If the server cannot be reached, does not answer in time, answers 404, refuses the key or names no id, the key stays stored without an id and the command still exits 0. A refusal and `organization: null` each get a notice on stderr.
+- **`agx logout`** calls it to learn `apiKey.id` for a key stored without one: by `agx config set apiKey` when that lookup failed, or by an earlier agx (§1.6).
 
 ### 1.6 `organizations.list` and `prm.apiKeys.delete` (self-revoke)
 
@@ -225,7 +228,7 @@ How agx uses it:
 - Output: `{ "success": true }`.
 - After success, the next call with that key gets 401 `API_KEY_INVALID`.
 
-**What `agx logout` does with it.** It revokes the profile's key on the server, then forgets it locally. The call goes to the origin the key was issued for, never to whatever the profile currently points at. A key stored with `agx config set apiKey` has no recorded id, so agx asks `account.principal.get` for it first.
+**What `agx logout` does with it.** It revokes the profile's key on the server, then forgets it locally. The call goes to the origin the key was issued for, never to whatever the profile currently points at. When the profile has no recorded id for the key (a key stored with `agx config set apiKey` whose lookup failed, §1.5), agx asks `account.principal.get` for it first; that still works after the key's owner has left the key's organization.
 
 `agx logout --json` prints `{"loggedOut":[{"profile","revoked","reason"}]}`, with one row per profile (`--all` covers every profile). `reason` is one of:
 
@@ -233,7 +236,7 @@ How agx uses it:
 |---|---|---|
 | `revoked` | The server deleted the key | yes |
 | `already-invalid` | The server refused the key itself (below), or the stored value could never be sent as a key | yes |
-| `revoke-failed` | Anything else went wrong | **no**: the run fails with exit 5 (unreachable), 6 (for example a 404 from a server without self-revoke) or 4 (any other 401) |
+| `revoke-failed` | Anything else went wrong | **no**: the run fails with exit 5 (unreachable), 6 (for example a 404 from a server without self-revoke) or 4 (any other 401, or another exit-4 code in §1.7) |
 | `not-revoked-local` | The same, under `--local` | yes, with a notice that the key is still valid |
 | `legacy-key-cleared` | A key left over from agx 0.3: forgotten, never revoked | yes |
 | `not-logged-in` | Nothing was stored | — |
@@ -261,7 +264,7 @@ An API error (§1.1) may carry a stable `data.code`. agx branches on it before a
 | `API_KEY_DISABLED` | `UNAUTHORIZED` / 401 | — | The key was disabled and can be re-enabled | 4 |
 | `API_KEY_RATE_LIMITED` | `TOO_MANY_REQUESTS` / 429 | `retryAfterMs` | The key's rate limit | 6 |
 | `API_KEY_USAGE_EXCEEDED` | `TOO_MANY_REQUESTS` / 429 | — | A key with a lifetime request quota has used it up | 6 |
-| `API_KEY_OWNER_NOT_MEMBER` | `FORBIDDEN` / 403 | — | The key's owner is no longer a member of the key's organization | 4 |
+| `API_KEY_OWNER_NOT_MEMBER` | `FORBIDDEN` / 403 | — | The key's owner is no longer a member of the key's organization. Not from `account.principal.get`, which answers with `organization: null` instead (§1.5). | 4 |
 | `API_KEY_SELF_REVOKE_ONLY` | `FORBIDDEN` / 403 | — | `prm.apiKeys.delete` with another key's id (§1.6) | 6 |
 | `LISTING_SLUG_TAKEN` | `CONFLICT` / 409 | — | Creating a listing whose slug is taken | 6 |
 | `LISTING_ADDRESS_LIVE` | `CONFLICT` / 409 | `listingId`, only when the live listing is in the caller's own organization | Creating a listing for an agent address that already has a live one | 6 |
@@ -334,7 +337,7 @@ A harness shows the URL, and `userCode` when there is one, to a person. It never
 
 **`agx login` modes**
 
-*Already logged in.* When the profile holds a login for the same server that has not expired, the run has no `--force`, and it does not ask for another organization (`--new-org`, or an `--org` other than the stored one), agx confirms the key with `account.principal.get` and exits 0 with `alreadyLoggedIn: true`. No code is requested.
+*Already logged in.* When the profile holds a login for the same server that has not expired, the run has no `--force`, and it does not ask for another organization (`--new-org`, or an `--org` other than the stored one), agx confirms the key with `account.principal.get` and exits 0 with `alreadyLoggedIn: true`. No code is requested. A key the server refuses, or answers with `organization: null` (§1.5), is not confirmed: the run requests a new code, and revokes the old key once the new login is stored (§1.6).
 
 *Which code a run uses.* A code that is waiting for approval is saved, with its device code, in `pending-login.json` in the profile's directory (mode `0600`). A run resumes that code when it is for the same server and the same request (`--org`, `--new-org`, `--org-name`, `--org-slug`) and has not expired. Otherwise it discards the file and requests a new code, with the one exception under `--no-wait` below.
 
@@ -407,6 +410,7 @@ Only one agx process polls a code at a time (a lock file beside `pending-login.j
 [`src/test/fixtures/contract-v1.json`](src/test/fixtures/contract-v1.json) holds the JSON bodies of §1.2, §1.3, §1.5, §1.6 and §1.7 as data: each request, each success body and each error with its status.
 
 - **The shapes are the contract:** which keys are present or absent, and the type of each value. The values are this document's examples, placeholders included (`"3f9c…(64 hex)"`).
+- One case is described here and not in the fixture: `account.principal.get` for a key whose owner is no longer a member of the key's organization is `principal.output` with `organization: null` (§1.5). agx's tests build it from that entry.
 - agx's own tests run against a mock directory server that serves these bodies and applies the §1.3 rules in order.
 - A server implementation can check itself the same way: assert that each of its responses has the shape of the matching fixture entry.
 - A change to the fixture needs a matching change to this document, and the other way round. The fixture's `version` is `1`.

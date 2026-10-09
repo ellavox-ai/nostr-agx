@@ -75,7 +75,10 @@ async function revoke(entry: CredentialEntry): Promise<RevokeResult> {
 
 	let apiKeyId = entry.apiKeyId;
 	if (!apiKeyId) {
-		// A manual key does not know its own id: ask the server first.
+		// A key stored without its id (`config set apiKey` could not look it
+		// up, or an older agx stored it): ask the server first. It answers even
+		// when the key's owner has left the key's organization
+		// (`organization: null`, LOGIN-CONTRACT.md §1.5), so the id is known.
 		let principal: { apiKey?: { id?: string } | null };
 		try {
 			principal = (await client.account.principal.get({})) as typeof principal;

@@ -1,4 +1,9 @@
 import {
+	BEST_EFFORT_RPC_TIMEOUT_MS,
+	createApiClient,
+	toCliError,
+} from "../lib/api.js";
+import {
 	assertApiBaseUrl,
 	assertSettableKey,
 	coerceSettableValue,
@@ -13,6 +18,7 @@ import {
 	updateProfile,
 } from "../lib/config.js";
 import {
+	type CredentialEntry,
 	getCredential,
 	originOf,
 	setCredential,
@@ -143,7 +149,7 @@ async function setApiKey(
 	const base = effectiveApiBaseUrl(profileName);
 	const baseUrl = assertApiBaseUrl(base.raw, { label: base.label });
 	const origin = originOf(baseUrl) ?? baseUrl;
-	setCredential(profileName, {
+	const entry: CredentialEntry = {
 		apiBaseUrl: origin,
 		apiKey: key,
 		apiKeyId: null,
@@ -154,13 +160,66 @@ async function setApiKey(
 		scopes: null,
 		expiresAt: null,
 		createdAt: new Date(runtime().now()).toISOString(),
-	});
+	};
+	setCredential(profileName, entry);
 	if (getProfile(profileName).apiKey) {
 		updateProfile(profileName, { apiKey: null });
 	}
 	ok(
 		`Stored the API key for profile "${profileName}" in ${credentialsPath()}; it is only ever sent to ${origin}.`,
 	);
+
+	// The key is stored whatever happens next. Recording its id now means a
+	// later `agx logout` can revoke it without asking the server who it is.
+	const apiKeyId = await lookUpKeyId(origin, key);
+	if (apiKeyId && getCredential(profileName)?.apiKey === key) {
+		setCredential(profileName, { ...entry, apiKeyId });
+	}
+}
+
+/**
+ * Best effort: the id of `apiKey` according to `account.principal.get` at its
+ * own origin (LOGIN-CONTRACT.md §1.5), or null. Never throws: offline, a
+ * timeout, a server without the procedure or one that refuses the key all
+ * leave the key stored without an id, which `agx logout` looks up itself.
+ * A refusal, or a key whose owner has left its organization, gets a notice.
+ */
+async function lookUpKeyId(
+	origin: string,
+	apiKey: string,
+): Promise<string | null> {
+	let principal: {
+		authMethod?: unknown;
+		organization?: unknown;
+		apiKey?: { id?: unknown } | null;
+	} | null;
+	try {
+		principal = (await createApiClient(
+			{ baseUrl: origin, apiKey },
+			{ timeoutMs: BEST_EFFORT_RPC_TIMEOUT_MS },
+		).account.principal.get({})) as typeof principal;
+	} catch (error) {
+		const cli = toCliError(error, "account.principal.get", origin);
+		if (cli.exitCode === EXIT.auth) {
+			notice(
+				`${origin} refused this key (${cli.message}). It is stored all the same; check it with:\n    agx whoami`,
+			);
+		}
+		return null;
+	}
+	if (
+		principal?.organization === null &&
+		principal.authMethod !== "session"
+	) {
+		notice(
+			"The account that owns this key is no longer a member of its organization, so the key cannot act on it.",
+		);
+	}
+	const id = principal?.apiKey?.id;
+	// It is stored and printed later: an identifier, never free text.
+	return typeof id === "string" && /^[\x21-\x7e]{1,256}$/.test(id)
+		? id
+		: null;
 }
 
 export async function configSetCommand(

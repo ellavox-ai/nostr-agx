@@ -91,6 +91,8 @@ export interface KeyRecord {
 	hostLabel: string | null;
 	expiresAt: string | null;
 	revoked: boolean;
+	/** False once the key's owner has left the key's organization. */
+	member: boolean;
 }
 
 export type RpcHandler = (
@@ -252,6 +254,7 @@ export async function startMockIndexServer(
 				? new Date(now() + 90 * 86_400_000).toISOString()
 				: null,
 			revoked: false,
+			member: true,
 		};
 		keys.push(record);
 		return record;
@@ -405,7 +408,11 @@ export async function startMockIndexServer(
 						id: key.user.id,
 						emailMasked: `${first}•••${key.user.email.slice(key.user.email.indexOf("@"))}`,
 					},
-					organization: { ...key.organization, role: "owner" },
+					// LOGIN-CONTRACT.md §1.5: a key whose owner has left its
+					// organization is answered, with `organization: null`.
+					organization: key.member
+						? { ...key.organization, role: "owner" }
+						: null,
 					apiKey: {
 						...template.apiKey,
 						id: key.id,
@@ -457,6 +464,15 @@ export async function startMockIndexServer(
 		}
 		if (!handler) {
 			return rpcNotFound();
+		}
+		// A former member's key may still say who it is and revoke itself;
+		// everything else is refused (LOGIN-CONTRACT.md §1.5, §1.7).
+		if (
+			!key.member &&
+			path !== "account/principal/get" &&
+			path !== "prm/apiKeys/delete"
+		) {
+			return rpcError("API_KEY_OWNER_NOT_MEMBER");
 		}
 		const input = (body as { json?: unknown } | null)?.json;
 		const result = await handler(input, key);
@@ -560,6 +576,7 @@ export async function startMockIndexServer(
 				hostLabel: null,
 				expiresAt: null,
 				revoked: false,
+				member: true,
 				...partial,
 			};
 			keys.push(record);
