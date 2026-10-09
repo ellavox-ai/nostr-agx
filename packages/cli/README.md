@@ -195,7 +195,9 @@ agx thread <contextId> [--mark-read]
 
 At most 50 messages are kept per held sender and 20 new unknown senders per hour.
 `inbox` exits `5` when no relay answered and `1` when `serve` or another `inbox` holds the
-profile lock (`held` decisions and `thread --mark-read` queue instead of failing). The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
+profile lock (`held` decisions and `thread --mark-read` queue instead of failing).
+A profile directory shared by several hosts needs roughly synchronised clocks: another host takes
+the lock over when its heartbeat is 60 s old by that host's clock, and the process that lost it exits. The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
 `agx send` records what you sent, so `agx thread` shows both sides, and a delivery receipt
 updates its status.
 

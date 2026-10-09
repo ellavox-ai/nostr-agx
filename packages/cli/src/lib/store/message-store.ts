@@ -46,9 +46,10 @@ const heldSchema = z.looseObject({
 	firstSeenAt: z.string(),
 	count: z.number(),
 	messages: z.array(
-		z.object({
+		z.looseObject({
 			id: z.string(),
 			at: z.string(),
+			receivedAt: z.string().optional(),
 			subject: z.string().nullable(),
 			contextId: z.string().nullable(),
 			contextIdWithheld: z.boolean(),
@@ -232,11 +233,13 @@ export class MessageStore {
 			}
 			try {
 				const op = spoolOpSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
-				if (op.success) {
-					this.applyOp(op.data);
+				if (!op.success) {
+					// Not understood (a newer version wrote it): leave it in place.
+					continue;
 				}
+				this.applyOp(op.data);
 			} catch {
-				// Unreadable: leave it for a newer version rather than delete it.
+				// Unreadable: leave it too.
 				continue;
 			}
 			this.claimed.push(file);
@@ -321,6 +324,7 @@ export class MessageStore {
 		sender.messages.push({
 			id: input.id,
 			at: input.at,
+			receivedAt: this.now().toISOString(),
 			subject: input.subject === null ? null : neutralizeControls(input.subject),
 			...safeContext(input.contextId),
 			text: heldText(neutralizeBodyControls(input.text)),
@@ -334,17 +338,22 @@ export class MessageStore {
 		const cutoff = this.now().getTime() - HELD_TTL_MS;
 		let changed = false;
 		for (const sender of this.held) {
-			const fresh = sender.messages.filter((m) => !(Date.parse(m.at) < cutoff));
+			const fresh = sender.messages.filter((m) => !(Date.parse(m.receivedAt ?? m.at) < cutoff));
 			if (fresh.length !== sender.messages.length) {
 				sender.messages = fresh;
 				changed = true;
 			}
 		}
+		const kept = this.held.filter((h) => h.status !== "held" || h.messages.length > 0 || !(Date.parse(h.firstSeenAt) < cutoff));
+		if (kept.length !== this.held.length) {
+			this.held = kept;
+			changed = true;
+		}
 		let total = this.held.reduce((sum, h) => sum + heldBytes(h), 0);
 		if (total > MAX_HELD_TOTAL_BYTES) {
 			const all = this.held
 				.flatMap((sender) => sender.messages.map((message) => ({ sender, message })))
-				.sort((a, b) => a.message.at.localeCompare(b.message.at));
+				.sort((a, b) => (a.message.receivedAt ?? a.message.at).localeCompare(b.message.receivedAt ?? b.message.at));
 			for (const { sender, message } of all) {
 				if (total <= MAX_HELD_TOTAL_BYTES) {
 					break;

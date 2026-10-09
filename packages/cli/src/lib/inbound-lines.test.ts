@@ -122,7 +122,7 @@ describe("--allowed-only", () => {
 	});
 
 	it.each([
-		["capped", "not kept: this sender is at the limit of kept messages"],
+		["capped", "not kept: the limit for kept messages is reached"],
 		["rate-limited", "not kept: too many new senders this hour"],
 		["suppressed", "not kept: you ignored or blocked this sender"],
 	] as const)("does not say a %s message was kept", (held, phrase) => {

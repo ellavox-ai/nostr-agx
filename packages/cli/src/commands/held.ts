@@ -75,15 +75,15 @@ export function heldDecideCommand(decision: HeldDecision, peer: string, options:
 	if (decision === "allow") {
 		ok(`Allowed ${npub}`);
 		if (queued) {
-			info("A running agx serve has the message store; their kept messages move into your inbox within a few seconds.");
+			info("Another agx process holds the message store; their kept messages move into your inbox when it next saves (a running agx serve does within a few seconds).");
 		} else if (released > 0) {
 			info(`${released} message${released === 1 ? "" : "s"} moved into your inbox. Read them with: agx inbox --unread`);
 		} else {
 			info("They had no kept messages; new ones will arrive in your inbox.");
 		}
 	} else if (decision === "ignore") {
-		ok(`Ignored ${npub}: their kept text is dropped and later messages are not kept.${queued ? " (applied by the running agx serve within a few seconds)" : ""}`);
+		ok(`Ignored ${npub}: their kept text is dropped and later messages are not kept.${queued ? " (applied when the process holding the message store next saves; agx serve does within a few seconds)" : ""}`);
 	} else {
-		ok(`Blocked ${npub}: their kept text is dropped, they are off the allowlist and later messages are not kept.${queued ? " (applied by the running agx serve within a few seconds)" : ""}`);
+		ok(`Blocked ${npub}: their kept text is dropped, they are off the allowlist and later messages are not kept.${queued ? " (applied when the process holding the message store next saves; agx serve does within a few seconds)" : ""}`);
 	}
 }

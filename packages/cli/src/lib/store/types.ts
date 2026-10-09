@@ -38,7 +38,10 @@ export type HeldStatus = "held" | "ignored" | "blocked";
 
 export interface HeldMessage {
 	id: string;
+	/** When the sender says it was sent. Not trusted for expiry. */
 	at: string;
+	/** When this machine received it; expiry and eviction go by this. */
+	receivedAt?: string;
 	subject: string | null;
 	contextId: string | null;
 	contextIdWithheld: boolean;

@@ -46,7 +46,7 @@ function holdLine(npub: string, held: HoldResult | "stored"): string {
 	const head = `${kleur.yellow("HOLD ")} from ${npub} — not on the allowlist; text withheld here and`;
 	switch (held) {
 		case "capped":
-			return `${head} not kept: this sender is at the limit of kept messages. To read what is kept: ${DECIDE(npub)}`;
+			return `${head} not kept: the limit for kept messages is reached. To read what is kept: ${DECIDE(npub)}`;
 		case "rate-limited":
 			return `${head} not kept: too many new senders this hour. To allow this one: ${DECIDE(npub)}`;
 		case "suppressed":

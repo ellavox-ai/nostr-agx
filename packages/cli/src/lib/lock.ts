@@ -162,26 +162,34 @@ export function tryAcquireLock(profile: string, onLost?: () => void): (() => voi
 /** Keep the lock fresh for hosts that cannot see our pid; the returned function releases it. */
 function startHeartbeat(path: string, token: string, onLost: () => void): () => void {
 	const ours = (): boolean => readRecord(path)?.token === token;
+	let released = false;
+	let checking = false;
 	const timer = setInterval(() => {
 		if (!ours()) {
-			clearInterval(timer);
-			// A clearer may have the file out for a moment; look again before giving up.
-			setTimeout(() => {
-				if (!ours()) {
-					onLost();
-				}
-			}, 200).unref();
+			// A clearer may have the file out for a moment, or a read may have failed: look
+			// again before giving up, and keep beating until then.
+			if (!checking) {
+				checking = true;
+				setTimeout(() => {
+					checking = false;
+					if (!released && !ours()) {
+						clearInterval(timer);
+						onLost();
+					}
+				}, 200).unref();
+			}
 			return;
 		}
 		try {
 			const now = new Date();
 			utimesSync(path, now, now);
 		} catch {
-			// The file is gone; the next tick sees that and stops.
+			// The file is gone; the next tick looks again.
 		}
 	}, LOCK_HEARTBEAT_MS);
 	timer.unref();
 	return () => {
+		released = true;
 		clearInterval(timer);
 		// Only remove the lock if it is still ours.
 		if (ours()) {
