@@ -156,6 +156,33 @@ describe("acquireLock", () => {
 			expect(onLost).not.toHaveBeenCalled();
 			release();
 		});
+
+		it("keeps refreshing the lock after a check that turned out fine", () => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+			const onLost = vi.fn();
+			const release = acquireLock("p", undefined, onLost);
+			const text = readFileSync(lockPath("p"), "utf8");
+			rmSync(lockPath("p"));
+			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS);
+			writeFileSync(lockPath("p"), text);
+			vi.advanceTimersByTime(250);
+			age(30);
+			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS);
+			expect(Date.now() - statSync(lockPath("p")).mtimeMs).toBeLessThan(5_000);
+			expect(onLost).not.toHaveBeenCalled();
+			release();
+		});
+
+		it("does not report a loss after the lock was released", () => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+			const onLost = vi.fn();
+			const release = acquireLock("p", undefined, onLost);
+			rmSync(lockPath("p"));
+			vi.advanceTimersByTime(LOCK_HEARTBEAT_MS);
+			release();
+			vi.advanceTimersByTime(500);
+			expect(onLost).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("clearing an abandoned lock", () => {

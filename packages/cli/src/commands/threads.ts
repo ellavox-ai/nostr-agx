@@ -1,6 +1,6 @@
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { tryAcquireLock } from "../lib/lock.js";
-import { json, say, table } from "../lib/output.js";
+import { info, json, say, table } from "../lib/output.js";
 import { resolveProfileName } from "../lib/config.js";
 import { profileDir } from "../lib/paths.js";
 import { MessageStore } from "../lib/store/message-store.js";
@@ -42,6 +42,7 @@ export function threadCommand(contextId: string, options: ThreadsOptions): void 
 	const releaseLock = tryAcquireLock(profileName);
 	if (releaseLock === null) {
 		MessageStore.spool(dir, { kind: "read", contextId });
+		info("Another agx process holds the message store; the thread is marked read when it next saves.");
 		return;
 	}
 	try {

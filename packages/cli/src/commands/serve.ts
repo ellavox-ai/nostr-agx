@@ -164,8 +164,20 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	const sessionAllow = (options.allow ?? []).map((entry) => toHexPubkey(entry, "--allow value"));
 	const allowed = new Set<string>();
 	// `agx identity allow` and `agx held allow|block` edit the profile while this runs.
+	let warnedAllowlist = false;
 	function refreshAllowed(): void {
-		const current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
+		let current: string[];
+		try {
+			current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
+		} catch (error) {
+			// Keep the last good list; say so once instead of failing every poll.
+			if (!warnedAllowlist) {
+				warnedAllowlist = true;
+				warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+		warnedAllowlist = false;
 		allowed.clear();
 		for (const entry of [...current, ...sessionAllow]) {
 			allowed.add(entry);

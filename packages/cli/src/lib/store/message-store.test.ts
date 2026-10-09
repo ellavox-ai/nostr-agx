@@ -350,6 +350,14 @@ describe("the spool", () => {
 		expect(after.listMessages().map((m) => m.id).sort()).toEqual(["h1", "in1"]);
 	});
 
+	it("leaves a spool file it does not understand in place", () => {
+		MessageStore.spool(dir, { kind: "decision", action: "block", npub: MALLORY });
+		writeFileSync(join(dir, SPOOL_DIR, "999-future.json"), JSON.stringify({ kind: "pin", id: "x" }));
+		new MessageStore(dir, () => clock, { claimSpool: true }).flush();
+		expect(spoolFiles()).toEqual(["999-future.json"]);
+		expect(open().heldStatus(MALLORY)).toBe("blocked");
+	});
+
 	it("queues a block", () => {
 		MessageStore.spool(dir, { kind: "decision", action: "block", npub: MALLORY });
 		new MessageStore(dir, () => clock, { claimSpool: true }).flush();
@@ -385,15 +393,33 @@ describe("held limits", () => {
 		expect(ids).toContain(`m${n}`);
 	});
 
-	it("drops held text past its age limit when the store opens", () => {
+	it("drops held text past its age limit, counted from when it was received", () => {
 		const store = open();
-		store.hold(MALLORY, msg({ id: "old", peer: MALLORY, at: new Date(clock.getTime() - HELD_TTL_MS - 1000).toISOString() }));
-		store.hold(MALLORY, msg({ id: "new", peer: MALLORY, at: clock.toISOString() }));
+		store.hold(MALLORY, msg({ id: "old", peer: MALLORY }));
 		store.flush();
-		const later = open();
+		const later = new MessageStore(dir, () => new Date(clock.getTime() + HELD_TTL_MS + 1000));
+		later.hold(MALLORY, msg({ id: "new", peer: MALLORY }));
 		const sender = later.listHeld()[0];
 		expect(sender?.messages.map((m) => m.id)).toEqual(["new"]);
-		expect(sender?.count).toBe(2);
+		expect(sender?.count).toBe(1);
+	});
+
+	it("does not let a sender choose how long its text lives", () => {
+		const store = open();
+		store.hold(MALLORY, msg({ id: "future", peer: MALLORY, at: "2099-01-01T00:00:00.000Z" }));
+		store.flush();
+		const later = new MessageStore(dir, () => new Date(clock.getTime() + HELD_TTL_MS + 1000));
+		expect(later.listHeld()).toEqual([]);
+	});
+
+	it("forgets a held sender whose text is all gone and who is old", () => {
+		const store = open();
+		store.hold(MALLORY, msg({ id: "a", peer: MALLORY }));
+		store.flush();
+		const later = new MessageStore(dir, () => new Date(clock.getTime() + HELD_TTL_MS + 1000));
+		expect(later.listHeld()).toEqual([]);
+		later.setSenderStatus(BOB, "blocked");
+		expect(later.heldStatus(BOB)).toBe("blocked");
 	});
 });
 
@@ -413,6 +439,20 @@ describe("records from a newer version", () => {
 		expect(lines).toHaveLength(2);
 		expect(JSON.parse(lines[0] as string)).toMatchObject({ id: "in1", pinned: true });
 		expect(lines[1]).toBe(future);
+	});
+
+	it("keeps extra fields on a held message", () => {
+		const first = open();
+		first.hold(MALLORY, msg({ id: "h1", peer: MALLORY }));
+		first.flush();
+		const path = join(dir, HELD_FILE);
+		const record = JSON.parse(readFileSync(path, "utf8").trim()) as { messages: Record<string, unknown>[] };
+		(record.messages[0] as Record<string, unknown>).reaction = "thumbs-up";
+		writeFileSync(path, `${JSON.stringify(record)}\n`);
+		const store = open();
+		store.hold(MALLORY, msg({ id: "h2", peer: MALLORY }));
+		store.flush();
+		expect(readFileSync(path, "utf8")).toContain('"reaction":"thumbs-up"');
 	});
 
 	it("keeps an unknown held record as written", () => {
