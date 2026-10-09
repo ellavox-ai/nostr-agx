@@ -1,0 +1,10 @@
+{
+	"schema": "agx.inbox.summary/1",
+	"new": 3,
+	"unread": 5,
+	"held": 1,
+	"relays": {
+		"ok": 1,
+		"unreachable": 1
+	}
+}

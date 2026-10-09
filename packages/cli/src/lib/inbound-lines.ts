@@ -1,5 +1,6 @@
 import kleur from "kleur";
 import { shortNpub } from "./output.js";
+import type { HoldResult } from "./store/types.js";
 
 /**
  * How `agx serve` prints an inbound plain message. Pure, so the one piece of
@@ -35,13 +36,29 @@ export interface InboundMessageView {
 	allowedOnly: boolean;
 	/** Print the full npub and contextId instead of the scannable short forms. */
 	fullIds: boolean;
+	/** What the store did with a withheld message; "kept" when not given. */
+	held?: HoldResult | "stored";
+}
+
+const DECIDE = (npub: string): string => `agx held allow ${npub} (or: agx held ignore | agx held block)`;
+
+function holdLine(npub: string, held: HoldResult | "stored"): string {
+	const head = `${kleur.yellow("HOLD ")} from ${npub} — not on the allowlist; text withheld here and`;
+	switch (held) {
+		case "capped":
+			return `${head} not kept: the limit for kept messages is reached. To read what is kept: ${DECIDE(npub)}`;
+		case "rate-limited":
+			return `${head} not kept: too many new senders this hour. To allow this one: ${DECIDE(npub)}`;
+		case "suppressed":
+			return `${head} not kept: you ignored or blocked this sender. To change that: agx held allow ${npub}`;
+		default:
+			return `${head} kept for your decision. To read it: ${DECIDE(npub)}`;
+	}
 }
 
 export function renderInboundLines(view: InboundMessageView): string[] {
 	if (view.allowedOnly && !view.allowed) {
-		return [
-			`${kleur.yellow("HOLD ")} from ${view.fromNpub} — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow ${view.fromNpub} (then ask them to resend)`,
-		];
+		return [holdLine(view.fromNpub, view.held ?? "kept")];
 	}
 	const from = view.fullIds ? view.fromNpub : shortNpub(view.fromNpub);
 	const subject = view.subject
@@ -89,6 +106,17 @@ export function neutralizeControls(value: string): string {
 	return value.replace(CONTROL_RE, "\uFFFD");
 }
 
+/** For a multi-line body: keeps newlines and tabs, normalises CRLF/CR to LF, and
+ * replaces the other control characters, C1 and U+2028/U+2029 with U+FFFD. */
+export function neutralizeBodyControls(value: string): string {
+	return value.replace(/\r\n?/g, "\n").replace(BODY_CONTROL_RE, "\uFFFD");
+}
+
+/** Whether a peer-supplied id is safe to print for pasting into a shell. */
+export function isSafeId(value: string): boolean {
+	return SAFE_ID_RE.test(value);
+}
+
 /** A peer-supplied value as JSON on one line, safe to print after a header. */
 // `unknown`: a task payload and a `--handler` result are arbitrary JSON by contract.
 export function oneLineJson(value: unknown): string {
@@ -109,4 +137,6 @@ const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
 const SAFE_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
 const CONTROL_RE = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
+const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/g;
 const C1_AND_SEPARATORS_RE = /[\u007f-\u009f\u2028\u2029]/g;

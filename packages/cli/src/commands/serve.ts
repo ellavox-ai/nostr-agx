@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -12,13 +12,15 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
+import { createCollector } from "../lib/inbox.js";
+import { acquireLock } from "../lib/lock.js";
 import {
 	neutralizeControls,
 	oneLineJson,
 	renderInboundLines,
 } from "../lib/inbound-lines.js";
 import { heading, info, kv, say, shortNpub, warn } from "../lib/output.js";
-import { ensureDir, lockPath, profileDir } from "../lib/paths.js";
+import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import {
 	capabilitiesToServe,
@@ -28,6 +30,7 @@ import {
 	unservedTaskNote,
 } from "../lib/serve-tasks.js";
 import { FileSeenStore, loadState, updateState } from "../lib/state.js";
+import { MessageStore } from "../lib/store/message-store.js";
 import { createTransport, makeLogger } from "../lib/transport.js";
 
 /**
@@ -129,36 +132,6 @@ async function loadHandlerModule(
 	return handlers;
 }
 
-function acquireLock(profile: string): () => void {
-	const path = lockPath(profile);
-	ensureDir(profileDir(profile));
-	if (existsSync(path)) {
-		const pid = Number(readFileSync(path, "utf8").trim());
-		// A stale lock from a crashed run must not block a restart forever, so the
-		// pid is probed rather than trusted.
-		let alive = false;
-		try {
-			process.kill(pid, 0);
-			alive = true;
-		} catch {
-			alive = false;
-		}
-		if (alive) {
-			throw new AgxCliError(
-				`Another \`agx serve\` is already running for profile "${profile}" (pid ${pid}).`,
-				{
-					exitCode: EXIT.config,
-					remediation:
-						"The seen-store is single-writer, so only one may run per profile. Stop the other one, or use a second profile:\n    agx serve --profile other",
-				},
-			);
-		}
-		rmSync(path, { force: true });
-	}
-	writeFileSync(path, `${process.pid}\n`, { mode: 0o600 });
-	return () => rmSync(path, { force: true });
-}
-
 export async function serveCommand(options: ServeOptions): Promise<void> {
 	// Checked before the lock and the relays: a contradictory command line should
 	// fail fast and touch nothing.
@@ -188,15 +161,39 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	// Session `--allow` flags are additive to the persisted allowlist; both are
 	// normalized to hex, because `authorize`'s `from` is a raw hex pubkey and an
 	// npub in the set would simply never match.
-	const allowed = new Set<string>(
-		profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")),
-	);
-	for (const entry of options.allow ?? []) {
-		allowed.add(toHexPubkey(entry, "--allow value"));
+	const sessionAllow = (options.allow ?? []).map((entry) => toHexPubkey(entry, "--allow value"));
+	const allowed = new Set<string>();
+	// `agx identity allow` and `agx held allow|block` edit the profile while this runs.
+	let warnedAllowlist = false;
+	function refreshAllowed(): void {
+		let current: string[];
+		try {
+			current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
+		} catch (error) {
+			// Keep the last good list; say so once instead of failing every poll.
+			if (!warnedAllowlist) {
+				warnedAllowlist = true;
+				warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+		warnedAllowlist = false;
+		allowed.clear();
+		for (const entry of [...current, ...sessionAllow]) {
+			allowed.add(entry);
+		}
 	}
+	refreshAllowed();
 
 	const transport = await createTransport(profile, identity, logger);
 	const seen = new FileSeenStore(profileName);
+	// Keeps what arrives, held senders' text included. Output below is unchanged.
+	const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
+	const collector = createCollector({
+		store,
+		allowed,
+		onError: (error) => warn(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
+	});
 	const stats = { ...state.stats };
 	/** Replies sent per `${peer}:${contextId}`, for the process's lifetime. The
 	 * local bound the SPEC requires alongside the sender-declared depth. */
@@ -249,6 +246,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 				},
 		onMessage: async (msg: AgxIncomingMessage) => {
 			stats.received += 1;
+			const stored = collector.onMessage(msg);
 			const npub = toDisplayNpub(msg.from);
 			const isAllowed = allowed.has(msg.from);
 			say("");
@@ -263,6 +261,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 				text: msg.text,
 				allowedOnly: options.allowedOnly === true,
 				fullIds: options.fullIds === true,
+				held: stored,
 			})) {
 				say(line);
 			}
@@ -363,6 +362,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			}
 		},
 		onReceipt: (receipt: AgxIncomingReceipt) => {
+			collector.onReceipt(receipt);
 			say(
 				`${kleur.green("ACK  ")} from ${shortNpub(toDisplayNpub(receipt.from))}  ${kleur.dim(
 					`ref ${neutralizeControls(receipt.receipt.refEventId.slice(0, 8))}  ${receipt.receipt.status}`,
@@ -498,6 +498,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	// listing id, and a long-running serve would silently erase it on its next
 	// poll.
 	function persist(): void {
+		// History before the seen-store: a crash in between re-delivers, and the store dedupes by id.
+		store.absorbSpool();
+		store.flush();
 		seen.flush();
 		updateState(profileName, {
 			cursor: state.cursor,
@@ -537,6 +540,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 
 	while (running) {
 		try {
+			// Before the pump, so a receipt for a send made since the last poll finds its message.
+			refreshAllowed();
+			store.absorbSpool();
 			const result = await client.pump();
 			// Advance ONLY on a complete poll. An incomplete source may still hold
 			// unseen events; advancing past them loses mail permanently.

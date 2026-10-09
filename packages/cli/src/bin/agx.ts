@@ -44,7 +44,10 @@ import { registerCommand } from "../commands/register.js";
 import { relayCommand } from "../commands/relay.js";
 import { searchCommand } from "../commands/search.js";
 import { requestCommand, sendCommand } from "../commands/send.js";
+import { heldDecideCommand, heldListCommand } from "../commands/held.js";
+import { inboxCommand } from "../commands/inbox.js";
 import { serveCommand } from "../commands/serve.js";
+import { threadCommand, threadsCommand } from "../commands/threads.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { setColor, setJsonMode } from "../lib/output.js";
 import { AGX_CLI_VERSION } from "../lib/version.js";
@@ -425,6 +428,49 @@ program
 	.option("--reset-cursor", "re-read the inbox from the beginning")
 	.option("-v, --verbose", "log transport activity")
 	.action((options) => serveCommand(withGlobals(options)));
+
+program
+	.command("inbox")
+	.description("pull new messages once and exit: never replies, never runs tasks")
+	.option("--wait <seconds>", "bound the pull (default 10)")
+	.option("--unread", "list every unread message, not only the new ones")
+	.option("--thread <contextId>", "list one thread")
+	.option("--full-ids", "print full npubs and ids")
+	.option("--summary", "counts only, no peer text (safe for a hook)")
+	.option("-v, --verbose", "log transport activity")
+	.action((options) => inboxCommand(withGlobals(options)));
+
+const held = program
+	.command("held")
+	.description("decide on senders who are not on your allowlist");
+held
+	.command("list")
+	.description("list held senders: address, count, first seen (never their text)")
+	.option("--full-ids", "print full npubs")
+	.action((options) => heldListCommand(withGlobals(options)));
+for (const [name, text] of [
+	["allow", "allow the sender and release their kept text into your inbox"],
+	["ignore", "drop the sender's kept text and keep later messages out"],
+	["block", "like ignore, and remove the sender from the allowlist"],
+] as const) {
+	held
+		.command(`${name} <npub>`)
+		.description(text)
+		.action((npub: string, options) => heldDecideCommand(name, npub, withGlobals(options)));
+}
+
+program
+	.command("threads")
+	.description("list your conversations")
+	.option("--full-ids", "print full npubs")
+	.action((options) => threadsCommand(withGlobals(options)));
+
+program
+	.command("thread <contextId>")
+	.description("show one conversation")
+	.option("--mark-read", "mark the shown messages as read")
+	.option("--full-ids", "print full npubs and ids")
+	.action((contextId: string, options) => threadCommand(contextId, withGlobals(options)));
 
 program
 	.command("send <peer> <message>")

@@ -1,0 +1,33 @@
+{
+	"schema": "agx.thread/1",
+	"contextId": "2bc8c14c9873c9fea764882abcee9fbd",
+	"contextIdWithheld": false,
+	"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+	"subject": "Invoice 1234",
+	"messages": [
+		{
+			"id": "1111111111111111111111111111111111111111111111111111111111111111",
+			"direction": "out",
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": "Invoice 1234",
+			"contextId": "2bc8c14c9873c9fea764882abcee9fbd",
+			"contextIdWithheld": false,
+			"text": "Sure, send me the PDF.",
+			"at": "2026-10-07T09:00:00Z",
+			"deliveryStatus": "sent",
+			"readAt": null
+		},
+		{
+			"id": "e1f0a8c3d2b14f5e9a7c6b5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f",
+			"direction": "in",
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": "Invoice 1234",
+			"contextId": "2bc8c14c9873c9fea764882abcee9fbd",
+			"contextIdWithheld": false,
+			"text": "Hi Alice, can you review invoice 1234?",
+			"at": "2026-10-07T09:12:41Z",
+			"deliveryStatus": null,
+			"readAt": null
+		}
+	]
+}

@@ -114,11 +114,21 @@ describe("--allowed-only", () => {
 			}),
 		);
 		expect(lines).toEqual([
-			`HOLD  from ${MALLORY} — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow ${MALLORY} (then ask them to resend)`,
+			`HOLD  from ${MALLORY} — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow ${MALLORY} (or: agx held ignore | agx held block)`,
 		]);
 		const joined = lines.join("\n");
 		expect(joined).not.toContain("ignore previous");
 		expect(joined).not.toContain("attacker-chosen-ctx");
+	});
+
+	it.each([
+		["capped", "not kept: the limit for kept messages is reached"],
+		["rate-limited", "not kept: too many new senders this hour"],
+		["suppressed", "not kept: you ignored or blocked this sender"],
+	] as const)("does not say a %s message was kept", (held, phrase) => {
+		const [line] = renderInboundLines(view({ fromNpub: MALLORY, allowed: false, allowedOnly: true, held }));
+		expect(line).toContain(phrase);
+		expect(line).not.toContain("kept for your decision");
 	});
 
 	it("prints the full npub on HOLD even without --full-ids", () => {

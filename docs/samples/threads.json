@@ -1,0 +1,23 @@
+{
+	"schema": "agx.threads/1",
+	"threads": [
+		{
+			"contextId": "2bc8c14c9873c9fea764882abcee9fbd",
+			"contextIdWithheld": false,
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": "Invoice 1234",
+			"messages": 4,
+			"unread": 1,
+			"lastMessageAt": "2026-10-07T09:12:41Z"
+		},
+		{
+			"contextId": null,
+			"contextIdWithheld": true,
+			"peer": "npub1n0m8c4qn3434zy2q7nxj7v029pqyyfjfg0af98yfll6ksnvq3mps2ynyfz",
+			"subject": null,
+			"messages": 1,
+			"unread": 1,
+			"lastMessageAt": "2026-10-07T09:20:05Z"
+		}
+	]
+}
