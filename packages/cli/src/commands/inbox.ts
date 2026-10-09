@@ -80,7 +80,9 @@ export async function inboxCommand(options: InboxOptions): Promise<void> {
 			startCursor: state.cursor,
 			// No capability is served, so nothing is authorized to run.
 			authorize: () => false,
-			onMessage: (msg) => collector.onMessage(msg),
+			onMessage: (msg) => {
+				collector.onMessage(msg);
+			},
 			onReceipt: (receipt) => collector.onReceipt(receipt),
 		});
 		await client.start({ pollIntervalMs: 0, advertise: false });

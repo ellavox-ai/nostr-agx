@@ -98,11 +98,11 @@ Samples: [`samples/threads.json`](samples/threads.json), [`samples/thread.json`]
 
 `agx held list --json` returns `agx.held/1`: `{ "schema": "agx.held/1", "held": [{ "from", "count", "firstSeenAt" }] }`: the sender's npub, how many messages they sent and when the first arrived. **No text.** The kept text is shown by `agx ui` and moved into a thread by `agx held allow`.
 
-- `agx held allow <npub>` adds the sender to the allowlist and moves their kept messages into the history (unread). A running `agx serve` reads the allowlist once, so restart it.
+- `agx held allow <npub>` adds the sender to the allowlist and moves their kept messages into the history (unread). A running `agx serve` picks up the new allowlist on its next poll.
 - `agx held ignore <npub>` drops the kept text; later messages from that sender are not kept.
 - `agx held block <npub>` does the same and removes the sender from the allowlist.
 
-With `--json` each decision prints `{ "ok": true, "action": "allow", "npub": "…", "released": 2 }`. They take the profile lock, so they fail while `agx serve` or `agx inbox` runs (exit 1); `list` does not.
+With `--json` each decision prints `{ "ok": true, "action": "allow", "npub": "…", "released": 2, "queued": false }`. While `agx serve` or `agx inbox` holds the profile lock, the allowlist change is made at once and the rest is queued for that process (`queued: true`, `released: 0`): `agx serve` applies it within a poll. `list` never needs the lock.
 
 Caps: 50 kept messages per held sender (the count keeps going) and 20 new unknown senders per hour.
 

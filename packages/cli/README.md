@@ -121,8 +121,9 @@ change that for a reader that acts on the output:
 
 A held message is **kept** in the local store, not printed: `serve` never shows its text.
 Read and decide with `agx held list`, then `agx held allow <npub>` (releases the text into
-your inbox), `agx held ignore <npub>` or `agx held block <npub>`. A running `serve` reads
-the allowlist once, so restart it after allowing a sender.
+your inbox), `agx held ignore <npub>` or `agx held block <npub>`. These work while `serve`
+runs: it picks up the allowlist and the decision on its next poll. A kept message is capped at
+8,000 characters, all held text at 8 MiB (the oldest goes first) and 30 days.
 
 `--allowed-only` changes **printing only**. A held message is still counted and
 recorded as seen, `--reply-any` still auto-replies to it, and `--allow-all` still
@@ -194,7 +195,7 @@ agx thread <contextId> [--mark-read]
 
 At most 50 messages are kept per held sender and 20 new unknown senders per hour.
 `inbox` exits `5` when no relay answered and `1` when `serve` or another `inbox` holds the
-profile lock. The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
+profile lock (`held` decisions and `thread --mark-read` queue instead of failing). The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
 `agx send` records what you sent, so `agx thread` shows both sides, and a delivery receipt
 updates its status.
 
@@ -441,11 +442,12 @@ a second profile. Every setting also reads from `AGX_API_URL`, `AGX_API_KEY`,
   profiles/<name>/seen.json      replay protection
   profiles/<name>/messages.jsonl your conversations, one JSON message per line
   profiles/<name>/held.jsonl     senders off the allowlist and their kept text
-  profiles/<name>/outbox.jsonl   sends waiting to be written to messages.jsonl (transient)
+  profiles/<name>/spool.d/       changes waiting for the lock holder: sends, held decisions, mark-read (transient)
 ```
 
 `serve` persists its cursor and seen-event ids after every poll, so a restart
 neither re-drains the inbox nor re-answers messages it already handled. One
 `serve` or `inbox` per profile — they take a lock, because the seen-store and the
-message store are single-writer. `agx send` does not take it: it queues the message in
-`outbox.jsonl` and the next lock holder writes it into `messages.jsonl`.
+message store are single-writer. `agx send`, `agx held allow|ignore|block` and
+`agx thread --mark-read` do not wait for it: when another process holds the lock they leave a small
+file in `spool.d/` and the lock holder applies it (a running `serve` within a poll).

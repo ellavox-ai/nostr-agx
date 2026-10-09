@@ -1,4 +1,5 @@
-import { appendFileSync, chmodSync, existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { isSafeId, neutralizeBodyControls, neutralizeControls } from "../inbound-lines.js";
@@ -16,11 +17,17 @@ import type {
 
 /** Most messages kept per held sender; the count keeps going past it. */
 export const MAX_HELD_PER_SENDER = 50;
+/** Longest held text kept; the rest is cut off. */
+export const MAX_HELD_TEXT_CHARS = 8_000;
+/** Most held text kept in all; the oldest is dropped first. */
+export const MAX_HELD_TOTAL_BYTES = 8 * 1024 * 1024;
+/** Held text older than this is dropped. */
+export const HELD_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Most new unknown senders recorded in any one hour. */
 export const MAX_NEW_SENDERS_PER_HOUR = 20;
 const HOUR_MS = 60 * 60 * 1000;
 
-const messageSchema = z.object({
+const messageSchema = z.looseObject({
 	id: z.string(),
 	direction: z.enum(["in", "out"]),
 	peer: z.string(),
@@ -33,7 +40,7 @@ const messageSchema = z.object({
 	readAt: z.string().nullable(),
 });
 
-const heldSchema = z.object({
+const heldSchema = z.looseObject({
 	npub: z.string(),
 	status: z.enum(["held", "ignored", "blocked"]),
 	firstSeenAt: z.string(),
@@ -52,9 +59,13 @@ const heldSchema = z.object({
 
 export const MESSAGES_FILE = "messages.jsonl";
 export const HELD_FILE = "held.jsonl";
-/** Outbound messages written by `agx send`, which must work while `serve` holds the lock. */
-export const SPOOL_FILE = "outbox.jsonl";
-const CLAIMED_PREFIX = "outbox.claimed.";
+/**
+ * Changes made by commands that cannot take the profile lock because `serve` holds it
+ * for hours: `send`, `held allow|ignore|block`, `thread --mark-read`. One small file
+ * each, written under a temporary name and renamed into place; the lock holder applies
+ * them and deletes the files only after its own write.
+ */
+export const SPOOL_DIR = "spool.d";
 
 const outboundSchema = z.object({
 	id: z.string(),
@@ -66,30 +77,57 @@ const outboundSchema = z.object({
 	deliveryStatus: z.string(),
 });
 
-/** Parse JSON-lines, dropping lines that are not valid records. */
-function readLines<T>(path: string, schema: z.ZodType<T>): T[] {
+const spoolOpSchema = z.discriminatedUnion("kind", [
+	z.object({ kind: z.literal("outbound"), message: outboundSchema }),
+	z.object({ kind: z.literal("decision"), action: z.enum(["allow", "ignore", "block"]), npub: z.string() }),
+	z.object({ kind: z.literal("read"), contextId: z.string() }),
+]);
+
+export type SpoolOp = z.infer<typeof spoolOpSchema>;
+
+interface ParsedLines<T> {
+	records: T[];
+	/** Valid JSON objects this version does not understand (a newer one wrote them); written back unchanged. */
+	unknown: string[];
+}
+
+/** Parse JSON-lines. Torn lines are dropped; lines from a newer version are kept as they are. */
+function readLines<T>(path: string, schema: z.ZodType<T>): ParsedLines<T> {
+	const result: ParsedLines<T> = { records: [], unknown: [] };
 	if (!existsSync(path)) {
-		return [];
+		return result;
 	}
-	const records: T[] = [];
 	for (const line of readFileSync(path, "utf8").split("\n")) {
 		if (line.trim() === "") {
 			continue;
 		}
+		let value: unknown;
 		try {
-			const parsed = schema.safeParse(JSON.parse(line));
-			if (parsed.success) {
-				records.push(parsed.data);
-			}
+			value = JSON.parse(line);
 		} catch {
-			// A torn or hand-edited line is skipped; the next flush rewrites the file clean.
+			// A torn or hand-edited line is dropped; the next flush rewrites the file clean.
+			continue;
+		}
+		const parsed = schema.safeParse(value);
+		if (parsed.success) {
+			result.records.push(parsed.data);
+		} else if (typeof value === "object" && value !== null) {
+			result.unknown.push(line);
 		}
 	}
-	return records;
+	return result;
 }
 
-function writeLines(path: string, records: unknown[]): void {
-	writePrivateText(path, records.map((record) => `${JSON.stringify(record)}\n`).join(""));
+function writeLines(path: string, records: unknown[], unknown: string[]): void {
+	writePrivateText(path, [...records.map((record) => JSON.stringify(record)), ...unknown].map((line) => `${line}\n`).join(""));
+}
+
+function heldText(text: string): string {
+	return text.length > MAX_HELD_TEXT_CHARS ? `${text.slice(0, MAX_HELD_TEXT_CHARS)}\n[cut off]` : text;
+}
+
+function heldBytes(sender: HeldSender): number {
+	return sender.messages.reduce((total, m) => total + Buffer.byteLength(m.text) + Buffer.byteLength(m.subject ?? ""), 0);
 }
 
 function safeContext(contextId: string | null): { contextId: string | null; contextIdWithheld: boolean } {
@@ -111,7 +149,10 @@ export class MessageStore {
 	private held: HeldSender[];
 	private messagesDirty = false;
 	private heldDirty = false;
-	/** Spool files this store took over; removed once their messages are written. */
+	/** Lines a newer version wrote that this one keeps but does not read. */
+	private messagesUnknown: string[];
+	private heldUnknown: string[];
+	/** Spool files this store applied; removed once the result is written. */
 	private claimed: string[] = [];
 
 	/**
@@ -126,65 +167,80 @@ export class MessageStore {
 	) {
 		this.messagesPath = join(dir, MESSAGES_FILE);
 		this.heldPath = join(dir, HELD_FILE);
-		this.messages = readLines(this.messagesPath, messageSchema);
-		this.held = readLines(this.heldPath, heldSchema);
+		const messages = readLines(this.messagesPath, messageSchema);
+		const held = readLines(this.heldPath, heldSchema);
+		this.messages = messages.records;
+		this.messagesUnknown = messages.unknown;
+		this.held = held.records;
+		this.heldUnknown = held.unknown;
+		this.enforceHeldLimits();
 		if (options.claimSpool === true) {
 			this.absorbSpool();
 		} else {
-			this.readSpool();
+			// A reader sees pending changes but writes nothing.
+			const { messagesDirty, heldDirty } = this;
+			this.absorbSpool();
+			this.claimed = [];
+			this.messagesDirty = messagesDirty;
+			this.heldDirty = heldDirty;
 		}
 	}
 
-	/**
-	 * Queue an outbound message for the next store writer. `agx send` calls this
-	 * instead of taking the lock, because `serve` may hold it for hours. An append
-	 * of one short line is atomic, so concurrent sends do not interleave.
-	 */
+	/** Queue a change for the next store writer; see `SPOOL_DIR`. */
+	static spool(dir: string, op: SpoolOp): void {
+		const spool = join(dir, SPOOL_DIR);
+		ensureDir(spool);
+		const name = `${Date.now().toString().padStart(15, "0")}-${process.pid}-${randomUUID().slice(0, 8)}`;
+		const tmp = join(spool, `${name}.tmp`);
+		writePrivateText(tmp, `${JSON.stringify(op)}\n`);
+		renameSync(tmp, join(spool, `${name}.json`));
+	}
+
+	/** `agx send` queues its record instead of taking the lock. */
 	static spoolOutbound(dir: string, message: NewOutboundMessage): void {
-		ensureDir(dir);
-		const path = join(dir, SPOOL_FILE);
-		appendFileSync(path, `${JSON.stringify(message)}\n`, { mode: 0o600 });
-		chmodSync(path, 0o600);
+		MessageStore.spool(dir, { kind: "outbound", message });
 	}
 
-	private spoolFiles(): { claimed: string[]; live: string | null } {
-		const claimed = existsSync(this.dir)
-			? readdirSync(this.dir)
-					.filter((name) => name.startsWith(CLAIMED_PREFIX))
-					.map((name) => join(this.dir, name))
-			: [];
-		const live = join(this.dir, SPOOL_FILE);
-		return { claimed, live: existsSync(live) ? live : null };
+	private spoolFiles(): string[] {
+		const spool = join(this.dir, SPOOL_DIR);
+		if (!existsSync(spool)) {
+			return [];
+		}
+		return readdirSync(spool)
+			.filter((name) => name.endsWith(".json"))
+			.sort()
+			.map((name) => join(spool, name));
 	}
 
-	private ingestFiles(files: string[]): void {
-		for (const file of files) {
-			for (const record of readLines(file, outboundSchema)) {
-				this.addOutbound(record);
-			}
+	private applyOp(op: SpoolOp): void {
+		if (op.kind === "outbound") {
+			this.addOutbound(op.message);
+		} else if (op.kind === "read") {
+			this.markRead({ contextId: op.contextId });
+		} else if (op.action === "allow") {
+			this.releaseHeld(op.npub);
+		} else {
+			this.setSenderStatus(op.npub, op.action === "ignore" ? "ignored" : "blocked");
 		}
 	}
 
-	/** Reader: sees spooled sends, changes nothing on disk. */
-	private readSpool(): void {
-		const { claimed, live } = this.spoolFiles();
-		this.ingestFiles(live ? [...claimed, live] : claimed);
-		// Nothing needs writing for what a reader only looked at.
-		this.messagesDirty = false;
-	}
-
-	/** Writer: take over what `agx send` spooled; `flush()` removes it once written. */
+	/** Apply what other commands queued; `flush()` removes the files once the result is written. */
 	absorbSpool(): void {
-		const { claimed, live } = this.spoolFiles();
-		const files = [...claimed];
-		if (live) {
-			// Rename first: a send that lands after this goes to a fresh spool file.
-			const taken = join(this.dir, `${CLAIMED_PREFIX}${process.pid}.${Date.now()}`);
-			renameSync(live, taken);
-			files.push(taken);
+		for (const file of this.spoolFiles()) {
+			if (this.claimed.includes(file)) {
+				continue;
+			}
+			try {
+				const op = spoolOpSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+				if (op.success) {
+					this.applyOp(op.data);
+				}
+			} catch {
+				// Unreadable: leave it for a newer version rather than delete it.
+				continue;
+			}
+			this.claimed.push(file);
 		}
-		this.ingestFiles(files);
-		this.claimed = [...new Set([...this.claimed, ...files])];
 	}
 
 	private has(id: string): boolean {
@@ -267,9 +323,40 @@ export class MessageStore {
 			at: input.at,
 			subject: input.subject === null ? null : neutralizeControls(input.subject),
 			...safeContext(input.contextId),
-			text: neutralizeBodyControls(input.text),
+			text: heldText(neutralizeBodyControls(input.text)),
 		});
-		return "kept";
+		this.enforceHeldLimits();
+		return this.held.some((h) => h === sender && h.messages.some((m) => m.id === input.id)) ? "kept" : "capped";
+	}
+
+	/** Drop held text past its age limit, then the oldest until the total fits. */
+	private enforceHeldLimits(): void {
+		const cutoff = this.now().getTime() - HELD_TTL_MS;
+		let changed = false;
+		for (const sender of this.held) {
+			const fresh = sender.messages.filter((m) => !(Date.parse(m.at) < cutoff));
+			if (fresh.length !== sender.messages.length) {
+				sender.messages = fresh;
+				changed = true;
+			}
+		}
+		let total = this.held.reduce((sum, h) => sum + heldBytes(h), 0);
+		if (total > MAX_HELD_TOTAL_BYTES) {
+			const all = this.held
+				.flatMap((sender) => sender.messages.map((message) => ({ sender, message })))
+				.sort((a, b) => a.message.at.localeCompare(b.message.at));
+			for (const { sender, message } of all) {
+				if (total <= MAX_HELD_TOTAL_BYTES) {
+					break;
+				}
+				total -= Buffer.byteLength(message.text) + Buffer.byteLength(message.subject ?? "");
+				sender.messages = sender.messages.filter((m) => m !== message);
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.heldDirty = true;
+		}
 	}
 
 	listMessages(filter: MessageFilter = {}): StoredMessage[] {
@@ -422,11 +509,11 @@ export class MessageStore {
 	/** Write what changed. A quiet run writes nothing. */
 	flush(): void {
 		if (this.messagesDirty) {
-			writeLines(this.messagesPath, this.messages);
+			writeLines(this.messagesPath, this.messages, this.messagesUnknown);
 			this.messagesDirty = false;
 		}
 		if (this.heldDirty) {
-			writeLines(this.heldPath, this.held);
+			writeLines(this.heldPath, this.held, this.heldUnknown);
 			this.heldDirty = false;
 		}
 		// Only after the history is on disk, so a crash re-reads the spool.

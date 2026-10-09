@@ -1,5 +1,5 @@
 import { AgxCliError, EXIT } from "../lib/errors.js";
-import { acquireLock } from "../lib/lock.js";
+import { tryAcquireLock } from "../lib/lock.js";
 import { json, say, table } from "../lib/output.js";
 import { resolveProfileName } from "../lib/config.js";
 import { profileDir } from "../lib/paths.js";
@@ -22,27 +22,33 @@ export function threadsCommand(options: ThreadsOptions): void {
 export function threadCommand(contextId: string, options: ThreadsOptions): void {
 	const profileName = resolveProfileName(options.profile);
 	const dir = profileDir(profileName);
-	// Marking read writes, so it takes the lock; reading alone does not.
-	const releaseLock = options.markRead ? acquireLock(profileName, EXIT.generic) : null;
+	const store = new MessageStore(dir);
+	const messages = store.getThread(contextId);
+	if (messages.length === 0) {
+		throw new AgxCliError(`No thread "${contextId}".`, {
+			exitCode: EXIT.generic,
+			remediation: "List threads with: agx threads",
+		});
+	}
+	const report = buildThreadReport(contextId, messages);
+	json(report);
+	for (const line of renderThreadLines(report, options.fullIds === true)) {
+		say(line);
+	}
+	if (!options.markRead) {
+		return;
+	}
+	// Marking read writes: do it now if no one holds the lock, else queue it for the holder.
+	const releaseLock = tryAcquireLock(profileName);
+	if (releaseLock === null) {
+		MessageStore.spool(dir, { kind: "read", contextId });
+		return;
+	}
 	try {
-		const store = new MessageStore(dir, undefined, { claimSpool: options.markRead === true });
-		const messages = store.getThread(contextId);
-		if (messages.length === 0) {
-			throw new AgxCliError(`No thread "${contextId}".`, {
-				exitCode: EXIT.generic,
-				remediation: "List threads with: agx threads",
-			});
-		}
-		const report = buildThreadReport(contextId, messages);
-		json(report);
-		for (const line of renderThreadLines(report, options.fullIds === true)) {
-			say(line);
-		}
-		if (options.markRead) {
-			store.markRead({ contextId });
-			store.flush();
-		}
+		const writer = new MessageStore(dir, undefined, { claimSpool: true });
+		writer.markRead({ contextId });
+		writer.flush();
 	} finally {
-		releaseLock?.();
+		releaseLock();
 	}
 }

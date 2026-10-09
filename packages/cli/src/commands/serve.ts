@@ -161,12 +161,17 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	// Session `--allow` flags are additive to the persisted allowlist; both are
 	// normalized to hex, because `authorize`'s `from` is a raw hex pubkey and an
 	// npub in the set would simply never match.
-	const allowed = new Set<string>(
-		profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")),
-	);
-	for (const entry of options.allow ?? []) {
-		allowed.add(toHexPubkey(entry, "--allow value"));
+	const sessionAllow = (options.allow ?? []).map((entry) => toHexPubkey(entry, "--allow value"));
+	const allowed = new Set<string>();
+	// `agx identity allow` and `agx held allow|block` edit the profile while this runs.
+	function refreshAllowed(): void {
+		const current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
+		allowed.clear();
+		for (const entry of [...current, ...sessionAllow]) {
+			allowed.add(entry);
+		}
 	}
+	refreshAllowed();
 
 	const transport = await createTransport(profile, identity, logger);
 	const seen = new FileSeenStore(profileName);
@@ -229,7 +234,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 				},
 		onMessage: async (msg: AgxIncomingMessage) => {
 			stats.received += 1;
-			collector.onMessage(msg);
+			const stored = collector.onMessage(msg);
 			const npub = toDisplayNpub(msg.from);
 			const isAllowed = allowed.has(msg.from);
 			say("");
@@ -244,6 +249,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 				text: msg.text,
 				allowedOnly: options.allowedOnly === true,
 				fullIds: options.fullIds === true,
+				held: stored,
 			})) {
 				say(line);
 			}
@@ -522,6 +528,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 
 	while (running) {
 		try {
+			// Before the pump, so a receipt for a send made since the last poll finds its message.
+			refreshAllowed();
+			store.absorbSpool();
 			const result = await client.pump();
 			// Advance ONLY on a complete poll. An incomplete source may still hold
 			// unseen events; advancing past them loses mail permanently.
