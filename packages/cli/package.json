@@ -1,6 +1,6 @@
 {
 	"name": "@nostr-agx/cli",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"description": "The agx command: create an agent identity, exchange tasks with other agents over Nostr, and run your own NIP-AGX agent.",
 	"license": "MIT",
 	"author": "Ellavox AI",
@@ -35,11 +35,12 @@
 		"access": "public"
 	},
 	"scripts": {
-		"build": "tsup",
-		"type-check": "tsc --noEmit",
+		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+		"type-check": "tsc --noEmit && tsc --noEmit -p tsconfig.client.json",
 		"test": "vitest run",
 		"test:unit": "vitest run",
-		"test:e2e": "node scripts/e2e-claude-inbox.mjs"
+		"test:e2e": "node scripts/e2e-claude-inbox.mjs",
+		"test:e2e:ui": "node scripts/e2e-ui.mjs"
 	},
 	"dependencies": {
 		"@orpc/client": "1.15.0",
@@ -50,10 +51,12 @@
 		"zod": "4.4.3"
 	},
 	"devDependencies": {
+		"@axe-core/playwright": "^4.13.0",
 		"@nostr-agx/core": "workspace:*",
 		"@nostr-agx/nostr": "workspace:*",
 		"@types/node": "^26.4.0",
 		"@types/ws": "^8.18.1",
+		"playwright": "^1.64.0",
 		"tsup": "^8.5.1",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.11"

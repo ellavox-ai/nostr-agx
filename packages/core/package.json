@@ -1,6 +1,6 @@
 {
 	"name": "@nostr-agx/core",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"description": "Transport-agnostic core of NIP-AGX, a draft Nostr standard for agent-to-agent task exchange: task lifecycle, result matching, delivery receipts, replay protection and capability matching.",
 	"license": "MIT",
 	"author": "Ellavox AI",

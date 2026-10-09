@@ -9,7 +9,7 @@
  * is injected (Node passes `ws`; browser/edge use the global).
  */
 
-export const AGX_NOSTR_VERSION = "0.3.1";
+export const AGX_NOSTR_VERSION = "0.3.2";
 
 // Re-exported so hosts can verify a peer-supplied signed event (e.g. a key
 // possession proof) without taking their own `nostr-tools` dependency — this

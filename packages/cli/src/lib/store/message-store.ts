@@ -490,6 +490,22 @@ export class MessageStore {
 		return true;
 	}
 
+	/** Senders the user ignored or blocked. */
+	listSenderDecisions(): { npub: string; status: "ignored" | "blocked" }[] {
+		return this.held.flatMap((h) => (h.status === "held" ? [] : [{ npub: h.npub, status: h.status }]));
+	}
+
+	/** Forget an ignore or block so the sender is held like any stranger again. */
+	forgetSender(npub: string): boolean {
+		const before = this.held.length;
+		this.held = this.held.filter((h) => !(h.npub === npub && h.status !== "held"));
+		const removed = this.held.length < before;
+		if (removed) {
+			this.heldDirty = true;
+		}
+		return removed;
+	}
+
 	/** Record a decision about a sender who has no held messages (a block, for example). */
 	setSenderStatus(npub: string, status: "ignored" | "blocked"): void {
 		if (this.dismissHeld(npub, status)) {

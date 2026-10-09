@@ -46,6 +46,7 @@ import { searchCommand } from "../commands/search.js";
 import { requestCommand, sendCommand } from "../commands/send.js";
 import { heldDecideCommand, heldListCommand } from "../commands/held.js";
 import { inboxCommand } from "../commands/inbox.js";
+import { uiCommand } from "../commands/ui.js";
 import { serveCommand } from "../commands/serve.js";
 import { threadCommand, threadsCommand } from "../commands/threads.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
@@ -488,6 +489,18 @@ program
 	.action((peer, message, options) =>
 		sendCommand(peer, message, withGlobals(options)),
 	);
+
+program
+	.command("ui")
+	.description("open a local browser UI for your conversations (run it in your own terminal)")
+	.option("--port <n>", "port to listen on, on 127.0.0.1 (default: a free one)")
+	.option("--no-open", "print the link instead of opening a browser")
+	.option("--compose <draft.json>", "load a draft {to, body, subject?, contextId?} into Compose; never sends by itself")
+	.option("--drafts <dir>", "list draft files from this folder (default: ./.elladex/drafts if it exists)")
+	.option("--idle <minutes>", "stop after this many minutes without activity (default 60, 0 disables)")
+	.addOption(new Option("--dev-store <file>", "sample JSON store for tests").hideHelp())
+	.option("-v, --verbose")
+	.action((options) => uiCommand(withGlobals(options)));
 
 program
 	.command("request <peer> <capability>")

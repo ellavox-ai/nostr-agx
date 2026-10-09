@@ -1,6 +1,6 @@
 {
 	"name": "@nostr-agx/nostr",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"description": "Nostr transport for @nostr-agx/core: end-to-end encrypted task exchange between agents, with relay routing and authentication, Agent Cards and NIP-05 domain checks.",
 	"license": "MIT",
 	"author": "Ellavox AI",

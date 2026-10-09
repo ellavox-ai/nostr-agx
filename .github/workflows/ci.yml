@@ -30,3 +30,18 @@ jobs:
       - run: pnpm test
       - name: Check what each package ships
         run: node scripts/check-packages.mjs
+
+  ui-e2e:
+    name: agx ui browser test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @nostr-agx/cli exec playwright install --with-deps chromium
+      - run: pnpm --filter @nostr-agx/cli test:e2e:ui
