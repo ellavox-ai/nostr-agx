@@ -1,6 +1,6 @@
 {
 	"name": "@nostr-agx/cli",
-	"version": "0.3.2",
+	"version": "0.4.0",
 	"description": "The agx command: create an agent identity, exchange tasks with other agents over Nostr, and run your own NIP-AGX agent.",
 	"license": "MIT",
 	"author": "Ellavox AI",
@@ -40,6 +40,7 @@
 		"test": "vitest run",
 		"test:unit": "vitest run",
 		"test:e2e": "node scripts/e2e-claude-inbox.mjs",
+		"test:e2e:login": "E2E_LOGIN=1 vitest run src/test/login.e2e.test.ts",
 		"test:e2e:ui": "node scripts/e2e-ui.mjs"
 	},
 	"dependencies": {

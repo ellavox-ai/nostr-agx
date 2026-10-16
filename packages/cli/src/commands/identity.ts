@@ -20,6 +20,7 @@ import { heading, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { identityPath } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { signNonceEvent } from "../lib/proof.js";
+import { readStdin } from "../lib/stdin.js";
 
 export interface IdentityOptions {
 	profile?: string;
@@ -212,12 +213,4 @@ export function identityAllowListCommand(options: IdentityOptions): void {
 		say(`  ${toDisplayNpub(hex)}`);
 	}
 	json({ allow: profile.allow.map(toDisplayNpub) });
-}
-
-async function readStdin(): Promise<string> {
-	const chunks: Buffer[] = [];
-	for await (const chunk of process.stdin) {
-		chunks.push(Buffer.from(chunk));
-	}
-	return Buffer.concat(chunks).toString("utf8");
 }

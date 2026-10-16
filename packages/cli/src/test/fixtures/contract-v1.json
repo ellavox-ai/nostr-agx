@@ -1,0 +1,270 @@
+{
+	"$comment": "Server-CLI contract v1 for agx login (packages/cli/LOGIN-CONTRACT.md, sections 1.2, 1.3, 1.5, 1.6 and 1.7). The SHAPES are the contract: keys, value types, and which keys are present or absent. Values are that document's examples, placeholders included. A change here needs a matching change to LOGIN-CONTRACT.md, and the other way round. The agx mock index server (src/test/mock-index-server.ts) serves these bodies.",
+	"version": 1,
+	"scopes": ["listings:read", "listings:write", "domains:read", "domains:write"],
+	"userCodePattern": "^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$",
+	"deviceCode": {
+		"method": "POST",
+		"path": "/api/auth/device/code",
+		"request": {
+			"client_id": "agx",
+			"scope": "listings:read listings:write domains:read domains:write",
+			"host_label": "alices-mbp"
+		},
+		"requestOptionalFields": ["org_hint", "new_org", "new_org_name", "new_org_slug"],
+		"response": {
+			"device_code": "3f9c…(64 hex)",
+			"user_code": "WDJB-MJHT",
+			"verification_uri": "https://app.ellaworks.ai/auth/device",
+			"verification_uri_complete": "https://app.ellaworks.ai/auth/device?code=WDJB-MJHT",
+			"expires_in": 1800,
+			"interval": 5,
+			"scope": "listings:read listings:write domains:read domains:write"
+		},
+		"legacyResponseKeys": [
+			"device_code",
+			"user_code",
+			"verification_uri",
+			"verification_uri_complete",
+			"expires_in",
+			"interval"
+		],
+		"legacyExpiresIn": 900,
+		"errors": {
+			"invalid_request": { "status": 400, "body": { "error": "invalid_request", "error_description": "…" } },
+			"invalid_client": { "status": 400, "body": { "error": "invalid_client" } },
+			"invalid_scope": { "status": 400, "body": { "error": "invalid_scope" } },
+			"rate_limited": {
+				"status": 429,
+				"headers": { "Retry-After": "60" },
+				"body": { "error": "rate_limited", "error_description": "…" }
+			},
+			"server_error": { "status": 500, "body": { "error": "server_error" } }
+		}
+	},
+	"deviceToken": {
+		"method": "POST",
+		"path": "/api/auth/device/token",
+		"request": {
+			"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+			"device_code": "3f9c…(64 hex)",
+			"client_id": "agx"
+		},
+		"success": {
+			"access_token": "ela_AbCd…(64 letters)",
+			"token_type": "Bearer",
+			"expires_in": 7776000,
+			"expires_at": "2026-12-29T18:04:11.000Z",
+			"scope": "listings:read listings:write domains:read domains:write",
+			"api_key_id": "k_9fJ…",
+			"user": { "id": "u_1", "email": "alice@acme.com", "name": "Alice" },
+			"organization": { "id": "o_1", "slug": "acme-robotics", "name": "Acme Robotics" }
+		},
+		"legacySuccess": {
+			"access_token": "ela_AbCd…(64 letters)",
+			"token_type": "Bearer",
+			"expires_in": null,
+			"expires_at": null,
+			"api_key_id": "k_9fJ…",
+			"user": { "id": "u_1", "email": "alice@acme.com", "name": "Alice" },
+			"organization": { "id": "o_1", "slug": "acme-robotics", "name": "Acme Robotics" }
+		},
+		"errors": {
+			"slow_down_firewall": { "status": 400, "body": { "error": "slow_down" } },
+			"invalid_request": { "status": 400, "body": { "error": "invalid_request" } },
+			"invalid_grant": { "status": 400, "body": { "error": "invalid_grant", "error_description": "Invalid device code" } },
+			"invalid_client": { "status": 400, "body": { "error": "invalid_client" } },
+			"unsupported_grant_type": { "status": 400, "body": { "error": "unsupported_grant_type" } },
+			"expired_token": { "status": 400, "body": { "error": "expired_token" } },
+			"access_denied": { "status": 400, "body": { "error": "access_denied" } },
+			"already_used": { "status": 400, "body": { "error": "invalid_grant", "error_description": "Device code already used" } },
+			"slow_down": { "status": 400, "body": { "error": "slow_down", "interval": 10 } },
+			"authorization_pending": { "status": 400, "body": { "error": "authorization_pending" } },
+			"approved_by_older_page": {
+				"status": 400,
+				"body": { "error": "expired_token", "error_description": "Approved by an older page; sign in again" }
+			},
+			"approver_lost_access": {
+				"status": 400,
+				"body": { "error": "access_denied", "error_description": "The approving account can no longer grant this" }
+			},
+			"server_error": {
+				"status": 500,
+				"body": { "error": "server_error", "error_description": "Could not issue a key, try again" }
+			}
+		}
+	},
+	"principal": {
+		"rpcPath": "/api/rpc/account/principal/get",
+		"restMethod": "GET",
+		"restPath": "/api/account/principal",
+		"input": {},
+		"output": {
+			"authMethod": "api_key",
+			"user": { "id": "u_1", "emailMasked": "a•••@acme.com" },
+			"organization": { "id": "o_1", "slug": "acme-robotics", "name": "Acme Robotics", "role": "owner" },
+			"apiKey": {
+				"id": "k_9fJ…",
+				"name": "agx-alices-mbp-3fa1",
+				"start": "ela_Ab",
+				"scoped": true,
+				"scopes": ["listings:read", "listings:write", "domains:read", "domains:write"],
+				"clientId": "agx",
+				"hostLabel": "alices-mbp",
+				"expiresAt": "2026-12-29T18:04:11.000Z"
+			}
+		},
+		"legacyKeyOutput": {
+			"authMethod": "api_key",
+			"user": { "id": "u_1", "emailMasked": "a•••@acme.com" },
+			"organization": { "id": "o_1", "slug": "acme-robotics", "name": "Acme Robotics", "role": "owner" },
+			"apiKey": {
+				"id": "k_legacy",
+				"name": "Settings key",
+				"start": "ela_Xy",
+				"scoped": false,
+				"scopes": [],
+				"clientId": null,
+				"hostLabel": null,
+				"expiresAt": null
+			}
+		},
+		"sessionOutput": {
+			"authMethod": "session",
+			"user": { "id": "u_1", "emailMasked": "a•••@acme.com" },
+			"organization": null,
+			"apiKey": null
+		}
+	},
+	"organizationsList": {
+		"rpcPath": "/api/rpc/organizations/list",
+		"restMethod": "GET",
+		"restPath": "/api/organizations",
+		"input": {},
+		"output": [
+			{ "id": "o_1", "name": "Acme Robotics", "slug": "acme-robotics", "logo": "https://…", "role": "owner" }
+		],
+		"optionalKeys": ["logo"]
+	},
+	"apiKeysDelete": {
+		"rpcPath": "/api/rpc/prm/apiKeys/delete",
+		"restMethod": "DELETE",
+		"restPath": "/api/api-keys/{apiKeyId}",
+		"input": { "apiKeyId": "k_9fJ…" },
+		"output": { "success": true }
+	},
+	"rpcErrors": {
+		"HUMAN_CONFIRMATION_REQUIRED": {
+			"status": 403,
+			"body": {
+				"json": {
+					"defined": false,
+					"code": "FORBIDDEN",
+					"status": 403,
+					"message": "Making this listing public needs an organization admin to confirm it in the browser: https://app.ellaworks.ai/elladex/listings/l_7?org=acme-robotics",
+					"data": {
+						"code": "HUMAN_CONFIRMATION_REQUIRED",
+						"url": "/elladex/listings/l_7?org=acme-robotics",
+						"listingId": "l_7",
+						"requested": { "visibility": "public", "status": "listed" }
+					}
+				}
+			}
+		},
+		"TERMS_ACCEPTANCE_REQUIRED": {
+			"status": 412,
+			"body": {
+				"json": {
+					"defined": false,
+					"code": "PRECONDITION_FAILED",
+					"status": 412,
+					"message": "The current Terms have to be accepted first.",
+					"data": {
+						"code": "TERMS_ACCEPTANCE_REQUIRED",
+						"termsVersion": "2026-03-02",
+						"url": "https://www.ellaworks.ai/en/legal/terms",
+						"loginRequired": false
+					}
+				}
+			}
+		},
+		"INSUFFICIENT_SCOPE": {
+			"status": 403,
+			"body": {
+				"json": {
+					"defined": false,
+					"code": "FORBIDDEN",
+					"status": 403,
+					"message": "This API key covers Elladex listings and domains only and cannot call `exchange.listPeers`.",
+					"data": { "code": "INSUFFICIENT_SCOPE", "required": null, "granted": ["listings:read", "listings:write", "domains:read", "domains:write"] }
+				}
+			}
+		},
+		"API_KEY_INVALID": {
+			"status": 401,
+			"body": {
+				"json": { "defined": false, "code": "UNAUTHORIZED", "status": 401, "message": "Invalid API key", "data": { "code": "API_KEY_INVALID" } }
+			}
+		},
+		"API_KEY_EXPIRED": {
+			"status": 401,
+			"body": {
+				"json": { "defined": false, "code": "UNAUTHORIZED", "status": 401, "message": "API key expired", "data": { "code": "API_KEY_EXPIRED" } }
+			}
+		},
+		"API_KEY_DISABLED": {
+			"status": 401,
+			"body": {
+				"json": { "defined": false, "code": "UNAUTHORIZED", "status": 401, "message": "API key disabled", "data": { "code": "API_KEY_DISABLED" } }
+			}
+		},
+		"API_KEY_RATE_LIMITED": {
+			"status": 429,
+			"body": {
+				"json": {
+					"defined": false,
+					"code": "TOO_MANY_REQUESTS",
+					"status": 429,
+					"message": "API key rate limited",
+					"data": { "code": "API_KEY_RATE_LIMITED", "retryAfterMs": 1234 }
+				}
+			}
+		},
+		"API_KEY_USAGE_EXCEEDED": {
+			"status": 429,
+			"body": {
+				"json": { "defined": false, "code": "TOO_MANY_REQUESTS", "status": 429, "message": "API key usage exceeded", "data": { "code": "API_KEY_USAGE_EXCEEDED" } }
+			}
+		},
+		"API_KEY_OWNER_NOT_MEMBER": {
+			"status": 403,
+			"body": {
+				"json": { "defined": false, "code": "FORBIDDEN", "status": 403, "message": "The key's owner is no longer a member", "data": { "code": "API_KEY_OWNER_NOT_MEMBER" } }
+			}
+		},
+		"API_KEY_SELF_REVOKE_ONLY": {
+			"status": 403,
+			"body": {
+				"json": { "defined": false, "code": "FORBIDDEN", "status": 403, "message": "An API key may only revoke itself", "data": { "code": "API_KEY_SELF_REVOKE_ONLY" } }
+			}
+		},
+		"LISTING_SLUG_TAKEN": {
+			"status": 409,
+			"body": {
+				"json": { "defined": false, "code": "CONFLICT", "status": 409, "message": "That listing slug is already taken.", "data": { "code": "LISTING_SLUG_TAKEN" } }
+			}
+		},
+		"LISTING_ADDRESS_LIVE": {
+			"status": 409,
+			"body": {
+				"json": {
+					"defined": false,
+					"code": "CONFLICT",
+					"status": 409,
+					"message": "That agent address is already listed on the index.",
+					"data": { "code": "LISTING_ADDRESS_LIVE", "listingId": "l_7" }
+				}
+			}
+		}
+	}
+}

@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 /**
  * Resolve the sibling AGX packages from source, as `packages/api` does, so unit
@@ -7,6 +7,17 @@ import { defineConfig } from "vitest/config";
  * install, where `@nostr-agx/core`'s `dist` does not exist).
  */
 export default defineConfig({
+	test: {
+		// Before any test module loads: a throwaway AGX_HOME and no inherited
+		// AGX_* overrides, so no test can touch the real ~/.agx.
+		setupFiles: ["./src/test/setup.ts"],
+		// `*.e2e.test.ts` drive the BUILT CLI, so they only run on request
+		// (`pnpm test:e2e:login`, after `pnpm build`), never in `test:unit`.
+		exclude: [
+			...configDefaults.exclude,
+			...(process.env.E2E_LOGIN ? [] : ["**/*.e2e.test.ts"]),
+		],
+	},
 	resolve: {
 		alias: [
 			{

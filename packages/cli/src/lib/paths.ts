@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
@@ -5,7 +6,9 @@ import {
 	mkdirSync,
 	openSync,
 	renameSync,
+	rmSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -21,10 +24,16 @@ import { dirname, join } from "node:path";
  *     every poll; a torn write there would strand the inbox.
  *
  *   ~/.agx/
- *     config.json                    profiles: API base, key, org, relays, allowlist
- *     profiles/<name>/identity.json  the secret key
- *     profiles/<name>/state.json     cursor + listing id
- *     profiles/<name>/seen.json      replay-protection ids
+ *     config.json                         profiles: API base, org, relays, allowlist
+ *                                         (never a key since 0.4; a 0.3 key is
+ *                                         migrated out on the next write)
+ *     credentials.json                    API keys, one per profile, each bound
+ *                                         to the one origin it may be sent to
+ *     profiles/<name>/identity.json       the secret key
+ *     profiles/<name>/state.json          cursor + listing id
+ *     profiles/<name>/seen.json           replay-protection ids
+ *     profiles/<name>/pending-login.json  an `agx login` waiting for approval
+ *     profiles/<name>/pending-login.lock  held by the one process polling it
  */
 
 export function agxHome(): string {
@@ -33,6 +42,10 @@ export function agxHome(): string {
 
 export function configPath(): string {
 	return join(agxHome(), "config.json");
+}
+
+export function credentialsPath(): string {
+	return join(agxHome(), "credentials.json");
 }
 
 export function profileDir(profile: string): string {
@@ -55,6 +68,14 @@ export function lockPath(profile: string): string {
 	return join(profileDir(profile), "serve.lock");
 }
 
+export function pendingLoginPath(profile: string): string {
+	return join(profileDir(profile), "pending-login.json");
+}
+
+export function pendingLoginLockPath(profile: string): string {
+	return join(profileDir(profile), "pending-login.lock");
+}
+
 export function ensureDir(dir: string): void {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	try {
@@ -65,24 +86,67 @@ export function ensureDir(dir: string): void {
 }
 
 /** Atomic, private write. Used for every file under `~/.agx`. */
-export function writePrivateJson(path: string, value: unknown): void {
-	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
+export function writePrivateJson(
+	path: string,
+	value: unknown,
+	options?: PrivateWriteOptions,
+): void {
+	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
-/** Atomic, private write of text (JSON-lines files use this directly). */
-export function writePrivateText(path: string, text: string): void {
+export interface PrivateWriteOptions {
+	/**
+	 * Flush to disk before the rename (default true). Only a file that means
+	 * nothing after a power loss, such as a lock heartbeat whose holder died
+	 * with the machine, turns this off.
+	 */
+	sync?: boolean;
+}
+
+/**
+ * Atomic, private write of text (JSON-lines files use this directly).
+ *
+ * The temp name is unique per write, so two processes writing the same file
+ * (two `agx login` runs finishing together) never share, and tear, one temp
+ * file. A failed write removes its temp file rather than leaving it behind.
+ */
+export function writePrivateText(
+	path: string,
+	text: string,
+	{ sync = true }: PrivateWriteOptions = {},
+): void {
 	ensureDir(dirname(path));
-	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, text, { mode: 0o600 });
-	chmodSync(tmp, 0o600);
-	// On disk before the rename, so a power loss never leaves an empty file where data was.
-	const fd = openSync(tmp, "r");
+	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
+		writeFileSync(tmp, text, { mode: 0o600 });
+		chmodSync(tmp, 0o600);
+		// On disk before the rename, so a power loss never leaves an empty file where data was.
+		if (sync) {
+			const fd = openSync(tmp, "r");
+			try {
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+		}
+		renameSync(tmp, path);
+	} catch (error) {
+		rmSync(tmp, { force: true });
+		throw error;
 	}
-	renameSync(tmp, path);
+}
+
+/** Delete a private file if it exists. Returns whether it was there. */
+export function removePrivateFile(path: string): boolean {
+	try {
+		unlinkSync(path);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return false;
+		}
+		throw error;
+	}
 }
 
 /** Returns the octal permission bits, or null when the file does not exist. */

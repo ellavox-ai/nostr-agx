@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `agx login`: log in through the browser with the device flow (RFC 8628). A person approves on the server and picks or creates the organization; agx stores a key scoped to that organization's listings and domains, which expires after 90 days on Elladex and is never printed. Flags `--org`, `--new-org` (`--org-name`, `--org-slug`), `--api-base-url`, `--no-browser`, `--force`. With `--json --no-wait` it exits 7 with the link and code, and running the same command again resumes that code (`pending-login.json`; one process polls it at a time, through `pending-login.lock`).
+- `agx logout [--all] [--local]` revokes the key on the server and forgets it. `agx whoami` shows who the stored credential acts as, according to the server. `agx org list` and `agx org create <name>`.
+- Exit code 7: a person has to act in a browser first (approve a login, confirm a public listing). With `--json` it prints exactly one `{"actionRequired":{…}}` object on stdout.
+- `agx listing publish --wait`, `agx domain verify --wait` and `agx domain add --handle`. `agx register` is safe to run again.
+- `LOGIN-CONTRACT.md`: what a directory server implements for `agx login`, and what the CLI promises harnesses. `pnpm test:e2e:login` runs the built CLI against a mock server.
+
+### Changed
+
+- API keys live in `credentials.json` (`0600`), one per profile, each bound to the server that issued it; agx never sends a stored key to another origin (exit 3). The order is `AGX_API_KEY`, then `credentials.json`, then a 0.3 key left in `config.json`, which moves to `credentials.json` the next time `config.json` is written, including by `agx held allow|block` and Allow or Block in `agx ui`.
+- New profiles default to `https://app.ellaworks.ai` (was `http://localhost:3000`). `apiBaseUrl` must be https, or http on localhost.
+- `agx config set apiKey --stdin` reads the key from stdin; a key passed as an argument still works and prints a deprecation warning. `agx config show` never prints a key, and `--reveal` is refused.
+- Errors follow the server's `data.code`: exit 4 for a key that is refused, expired or bound to another organization; 6 for a refusal on the merits; 5 when the server cannot be reached or does not answer within 30 seconds.
+- `agx doctor` checks `credentials.json`, where the credential comes from and whether it may be sent to this server, and warns about a login that expires within 7 days. `--fix-perms` also removes an abandoned `pending-login.lock`.
+- Private files are written through a unique temporary name that is removed if the write fails. A waiting `agx login` does not sync its per-poll rewrites (`pending-login.json`, the lock heartbeat) to disk; every other write still is.
+
 ## 0.3.2
 
 ### Added

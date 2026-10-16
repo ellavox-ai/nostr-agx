@@ -1,9 +1,5 @@
 import { createApiClient, toCliError } from "../lib/api.js";
-import {
-	effectiveProfile,
-	requireApiCredentials,
-	resolveProfileName,
-} from "../lib/config.js";
+import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
 import { heading, info, json, say, table } from "../lib/output.js";
 import { renderListingRows } from "./listing.js";
 
@@ -23,11 +19,7 @@ export async function searchCommand(
 	options: SearchOptions,
 ): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
-	const profile = effectiveProfile(profileName);
-	const creds = requireApiCredentials(
-		options.org ? { ...profile, orgSlug: options.org } : profile,
-		profileName,
-	);
+	const creds = resolveApiCredentials(profileName, { org: options.org });
 	const client = createApiClient(creds);
 
 	let result: {
