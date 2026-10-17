@@ -4,3 +4,16 @@ packages:
 onlyBuiltDependencies:
   - esbuild
   - "@swc/core"
+
+# Native add-ons that `n8n-workflow` (a dev dependency of packages/n8n-nodes-agx,
+# used for its types and in tests) pulls in. Nothing here loads them.
+ignoredBuiltDependencies:
+  - cpu-features
+  - isolated-vm
+  - ssh2
+
+peerDependencyRules:
+  allowedVersions:
+    # n8n-workflow asks for zod 3; the workspace is on zod 4. n8n supplies its
+    # own n8n-workflow (and zod) at runtime, so only the dev copy sees this one.
+    n8n-workflow>zod: "4"

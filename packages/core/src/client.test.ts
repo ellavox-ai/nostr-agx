@@ -951,3 +951,75 @@ describe("AgxClient batches seen-store writes when the store can", () => {
 		expect(add).toHaveBeenCalledTimes(junk.length);
 	});
 });
+
+describe("AgxClient gives a host what it needs to keep its own replay records", () => {
+	it("hands the handler the request's event id and send time", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+		});
+		const seen = vi.fn();
+		bob.handle("x.y", (task) => {
+			seen(task);
+			return null;
+		});
+		void alice.request(BOB, "x.y", {}, { timeoutMs: 0 });
+		await new Promise((r) => setTimeout(r, 0));
+		const [request] = bus.inbox.get(BOB) ?? [];
+		await bob.pump();
+		expect(seen).toHaveBeenCalledWith(
+			expect.objectContaining({ eventId: request.eventId, from: ALICE }),
+		);
+	});
+
+	it("drops what `ignore` rejects before authorization, receipt or onMessage, and records it as seen", async () => {
+		const authorize = vi.fn(() => true);
+		const onMessage = vi.fn();
+		const onReceipt = vi.fn();
+		const handler = vi.fn(() => null);
+		const ignore = vi.fn(() => true);
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize,
+			onMessage,
+			onReceipt,
+			ignore,
+		});
+		bob.handle("x.y", handler);
+		void alice.request(BOB, "x.y", {}, { timeoutMs: 0 });
+		await new Promise((r) => setTimeout(r, 0));
+		bus.pushMessage(BOB, {
+			from: ALICE,
+			text: "hi",
+			contextId: "c",
+			messageId: "m",
+			subject: null,
+			autoDepth: null,
+			contentType: "application/a2a+json",
+		});
+		bus.pushReceiptEvent(BOB, {
+			from: ALICE,
+			receipt: {
+				v: 1,
+				kind: "receipt",
+				refEventId: "x",
+				contextId: "c",
+				status: "delivered",
+			},
+		});
+		const { dispatched, complete } = await bob.pump();
+		expect(ignore).toHaveBeenCalledTimes(3);
+		expect(authorize).not.toHaveBeenCalled();
+		expect(handler).not.toHaveBeenCalled();
+		expect(onMessage).not.toHaveBeenCalled();
+		expect(onReceipt).not.toHaveBeenCalled();
+		expect(bus.receipts.get(ALICE) ?? []).toHaveLength(0);
+		expect(bus.inbox.get(ALICE) ?? []).toHaveLength(0);
+		expect({ dispatched, complete }).toEqual({ dispatched: 0, complete: true });
+		// Seen: the next poll does not ask again.
+		await bob.pump();
+		expect(ignore).toHaveBeenCalledTimes(3);
+	});
+});

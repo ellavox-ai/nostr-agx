@@ -1,0 +1,68 @@
+{
+	"name": "@nostr-agx/n8n-nodes-agx",
+	"version": "0.3.2",
+	"description": "n8n community nodes for NIP-AGX: request tasks from other agents, send them messages, read their Agent Cards, and answer their tasks with an n8n workflow, over Nostr.",
+	"license": "MIT",
+	"author": {
+		"name": "Ellavox AI",
+		"url": "https://www.ellavox.ai"
+	},
+	"homepage": "https://www.ellavox.ai/elladex",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ellavox-ai/nostr-agx.git",
+		"directory": "packages/n8n-nodes-agx"
+	},
+	"bugs": {
+		"url": "https://github.com/ellavox-ai/nostr-agx/issues"
+	},
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"nip-agx",
+		"nostr-agx",
+		"nostr",
+		"agents",
+		"agent-to-agent"
+	],
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"credentials": [
+			"dist/credentials/AgxApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Agx/Agx.node.js",
+			"dist/nodes/AgxTrigger/AgxTrigger.node.js"
+		]
+	},
+	"scripts": {
+		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+		"type-check": "tsc --noEmit",
+		"test": "vitest run",
+		"test:unit": "vitest run"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"devDependencies": {
+		"@nostr-agx/core": "workspace:*",
+		"@nostr-agx/nostr": "workspace:*",
+		"@types/node": "^26.4.0",
+		"@types/ws": "^8.18.1",
+		"n8n-workflow": "2.35.3",
+		"nostr-tools": "^2.25.0",
+		"tsup": "^8.5.1",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.11",
+		"ws": "^8.21.3",
+		"zod": "4.4.3"
+	}
+}

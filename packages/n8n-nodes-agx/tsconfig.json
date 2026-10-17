@@ -1,0 +1,22 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"compilerOptions": {
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"incremental": false,
+		"isolatedModules": true,
+		"module": "ESNext",
+		"target": "ES2022",
+		"moduleResolution": "bundler",
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"strictNullChecks": true,
+		"lib": ["ES2022", "DOM"],
+		"types": ["node"],
+		"noEmit": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["credentials", "nodes", "test", "*.ts"],
+	"exclude": ["dist", "node_modules"]
+}

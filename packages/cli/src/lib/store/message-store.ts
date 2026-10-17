@@ -127,8 +127,20 @@ function heldText(text: string): string {
 	return text.length > MAX_HELD_TEXT_CHARS ? `${text.slice(0, MAX_HELD_TEXT_CHARS)}\n[cut off]` : text;
 }
 
+const heldMessageBytes = new WeakMap<object, number>();
+
+/** Bytes of one held message's text and subject, counted once per message. */
+function messageBytes(message: { text: string; subject: string | null }): number {
+	let bytes = heldMessageBytes.get(message);
+	if (bytes === undefined) {
+		bytes = Buffer.byteLength(message.text) + Buffer.byteLength(message.subject ?? "");
+		heldMessageBytes.set(message, bytes);
+	}
+	return bytes;
+}
+
 function heldBytes(sender: HeldSender): number {
-	return sender.messages.reduce((total, m) => total + Buffer.byteLength(m.text) + Buffer.byteLength(m.subject ?? ""), 0);
+	return sender.messages.reduce((total, m) => total + messageBytes(m), 0);
 }
 
 function safeContext(contextId: string | null): { contextId: string | null; contextIdWithheld: boolean } {
@@ -358,7 +370,7 @@ export class MessageStore {
 				if (total <= MAX_HELD_TOTAL_BYTES) {
 					break;
 				}
-				total -= Buffer.byteLength(message.text) + Buffer.byteLength(message.subject ?? "");
+				total -= messageBytes(message);
 				sender.messages = sender.messages.filter((m) => m !== message);
 				changed = true;
 			}

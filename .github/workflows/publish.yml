@@ -1,0 +1,49 @@
+name: Publish
+
+# Publishes every package to npm, with provenance, when a version tag is
+# pushed. n8n requires community nodes to be published from a CI workflow with
+# provenance, and the attestation lets anyone check which commit of this
+# repository a package was built from. See RELEASING.md.
+#
+# Authentication is npm Trusted Publishing (OIDC): each package on npmjs.com
+# trusts this repository's `publish.yml`, and no token is stored here. Until a
+# package has a trusted publisher (a package must exist on npm before it can
+# have one), the NPM_TOKEN secret is used instead, when it is set.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Mints the OIDC token npm exchanges for publish rights and signs the
+      # provenance attestation with.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm type-check
+      - run: pnpm test
+      - name: Check what each package ships
+        run: node scripts/check-packages.mjs
+      - name: Publish
+        run: node scripts/publish-packages.mjs "$GITHUB_REF_NAME"
+        env:
+          # Empty unless the secret is set; npm then uses Trusted Publishing.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

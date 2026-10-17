@@ -66,6 +66,12 @@ export interface AgxClientOptions {
 	 * messages). Dispatched at-most-once per receipt via the SeenStore; throwing
 	 * holds the cursor for a retry next poll. */
 	onReceipt?: (receipt: AgxIncomingReceipt) => void | Promise<void>;
+	/** Host filter, consulted before anything else is done with an inbound event:
+	 * one it returns true for is recorded as seen and never dispatched — no
+	 * authorization, no receipt, no handler, no `onMessage`/`onReceipt`. For
+	 * events the host has decided never to act on, such as ones dated before it
+	 * started listening. Tell a receipt from a message by its `receipt` field. */
+	ignore?: (event: AgxIncomingMessage | AgxIncomingReceipt) => boolean;
 	/** Default `request()` timeout in ms (default 30000; 0 disables). */
 	requestTimeoutMs?: number;
 	/** Poll-overlap in seconds (replay-safe redelivery of late events; default 120). */
@@ -92,14 +98,18 @@ interface Pending {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_POLL_OVERLAP_SEC = 120;
+/** Default {@link AgxClientOptions.pollOverlapSec}. Exported for hosts that keep
+ * their own replay records and must know how far back a poll reaches. */
+export const DEFAULT_POLL_OVERLAP_SEC = 120;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 /** Default cap on failed dispatch attempts before an event is dead-lettered. */
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 10;
 /** Reject events dated further than this ahead of now — `createdAt` is
  * sender-declared, and a future-dated event must never advance the cursor (that
- * would freeze the inbox forever). Mirrors the host ingest guard. */
-const MAX_FUTURE_SKEW_SEC = 300;
+ * would freeze the inbox forever). Mirrors the host ingest guard. Exported, like
+ * {@link DEFAULT_POLL_OVERLAP_SEC}, for hosts that keep their own replay records:
+ * an event dispatched at time `t` is dated no later than `t` plus this. */
+export const MAX_FUTURE_SKEW_SEC = 300;
 
 export class AgxClient {
 	private readonly transport: AgxTransport;
@@ -115,6 +125,9 @@ export class AgxClient {
 	private readonly onReceipt?: (
 		receipt: AgxIncomingReceipt,
 	) => void | Promise<void>;
+	private readonly ignore?: (
+		event: AgxIncomingMessage | AgxIncomingReceipt,
+	) => boolean;
 	private readonly requestTimeoutMs: number;
 	private readonly pollOverlapSec: number;
 	private readonly maxDispatchAttempts: number;
@@ -136,6 +149,7 @@ export class AgxClient {
 		this.identity = opts.identity;
 		this.onMessage = opts.onMessage;
 		this.onReceipt = opts.onReceipt;
+		this.ignore = opts.ignore;
 		this.requestTimeoutMs =
 			opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		this.pollOverlapSec = opts.pollOverlapSec ?? DEFAULT_POLL_OVERLAP_SEC;
@@ -432,6 +446,11 @@ export class AgxClient {
 			if (await skipDuplicate(msg)) {
 				continue;
 			}
+			if (this.ignore?.(msg)) {
+				await markSeen(msg);
+				attempted.set(msg.eventId, "done");
+				continue;
+			}
 			try {
 				await this.dispatchMessage(msg);
 			} catch (err) {
@@ -469,6 +488,11 @@ export class AgxClient {
 				continue;
 			}
 			if (await skipDuplicate(receipt)) {
+				continue;
+			}
+			if (this.ignore?.(receipt)) {
+				await markSeen(receipt);
+				attempted.set(receipt.eventId, "done");
 				continue;
 			}
 			try {
@@ -664,6 +688,9 @@ export class AgxClient {
 			payload: env.payload,
 			from: msg.from,
 			contextId: msg.contextId,
+			eventId: msg.eventId,
+			transportId: msg.transportId,
+			sentAt: msg.sentAt,
 		};
 		try {
 			const output = await handler(task);
