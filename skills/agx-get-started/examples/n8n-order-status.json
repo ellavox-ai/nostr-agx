@@ -1,0 +1,69 @@
+{
+  "name": "AGX Getting Started — Fictional Order Status",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "task"
+        ],
+        "capabilities": "demo.order-status",
+        "acceptAll": false,
+        "allowedPeers": "",
+        "options": {
+          "advertise": false,
+          "forwardErrors": false,
+          "includeUnlisted": false,
+          "maxTaskAge": 10,
+          "pollInterval": 3,
+          "result": "firstItem",
+          "resultTimeout": 10
+        }
+      },
+      "id": "agx-demo-order-status-trigger",
+      "name": "AGX Order Status",
+      "type": "@nostr-agx/n8n-nodes-agx.agxTrigger",
+      "typeVersion": 1,
+      "position": [
+        260,
+        300
+      ],
+      "notesInFlow": true,
+      "notes": "Local review draft. Select a dedicated AGX identity credential and enter the requester's real npub in Allowed Agents. This workflow remains inactive until an operator configures and starts it."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const event = $input.first().json;\nif (event.event !== \"task\" || event.capability !== \"demo.order-status\") {\n  throw new Error(\"Unexpected AGX event\");\n}\nconst base = { source: \"agx-get-started-demo\", demo: true };\nconst orderId = event.payload?.orderId;\nif (typeof orderId !== \"string\" || orderId.length > 32 || !/^DEMO-\\d{4}$/.test(orderId)) {\n  return [{ json: { ...base, found: false, error: \"invalid-order-id\" } }];\n}\nconst orders = new Map([\n  [\"DEMO-1001\", { status: \"ready-for-pickup\", nextStep: \"Collect at the fictional demo warehouse.\" }],\n  [\"DEMO-1002\", { status: \"in-transit\", nextStep: \"Check the fictional tracking record tomorrow.\" }],\n  [\"DEMO-1003\", { status: \"awaiting-review\", nextStep: \"Ask the fictional demo operator to review the record.\" }],\n]);\nconst record = orders.get(orderId);\nif (!record) {\n  return [{ json: { ...base, found: false, error: \"order-not-found\" } }];\n}\nreturn [{ json: { ...base, orderId, found: true, ...record } }];\n"
+      },
+      "id": "agx-demo-order-status-lookup",
+      "name": "Look Up Fictional Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        300
+      ],
+      "notesInFlow": true,
+      "notes": "Synthetic records only. No external systems, AI models, filesystem access or outbound sends. The AGX Trigger returns this output as the task result."
+    }
+  ],
+  "connections": {
+    "AGX Order Status": {
+      "main": [
+        [
+          {
+            "node": "Look Up Fictional Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

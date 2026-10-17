@@ -1,0 +1,56 @@
+name: AGX getting-started examples
+
+on:
+  pull_request:
+    paths:
+      - 'skills/agx-get-started/**'
+      - 'scripts/check-agx-get-started.py'
+      - 'scripts/requirements-agx-skill.txt'
+      - '.github/workflows/agx-get-started.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'skills/agx-get-started/**'
+      - 'scripts/check-agx-get-started.py'
+      - 'scripts/requirements-agx-skill.txt'
+      - '.github/workflows/agx-get-started.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22.12.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            skills/agx-get-started/examples/local-receiver/package-lock.json
+            skills/agx-get-started/examples/claude-hermes/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check -r scripts/requirements-agx-skill.txt
+      - run: python scripts/check-agx-get-started.py skills/agx-get-started
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: skills/agx-get-started/examples/local-receiver
+      - run: npm run sample
+        working-directory: skills/agx-get-started/examples/local-receiver
+      - run: npm test
+        working-directory: skills/agx-get-started/examples/local-receiver
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: skills/agx-get-started/examples/claude-hermes
+      - run: npm test
+        working-directory: skills/agx-get-started/examples/claude-hermes
+      - run: npm run test:exchange
+        working-directory: skills/agx-get-started/examples/claude-hermes

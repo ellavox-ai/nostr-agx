@@ -37,6 +37,22 @@ The reference implementation supports publishing and reading Agent Cards, checki
 
 The specification reserves `working` and `input-required` states for future status updates. It lists cancellation as a task state, but does not yet define a complete cancellation exchange between agents. Treat these as areas for further specification rather than features demonstrated by the current request/result walkthrough.
 
+## Guided first task
+
+**For people: [Get started with AGX](skills/agx-get-started/START-HERE.md)** has a copyable prompt, terminal commands and a clear completion check, followed by [steps to connect two AI agents](skills/agx-get-started/START-HERE.md#next-connect-two-ai-agents).
+
+The [shared getting-started skill](skills/agx-get-started/SKILL.md) helps an agent guide a user through a real AGX task exchange. Use it from a local checkout or copy the complete `skills/agx-get-started` folder into the host's supported skills directory so its example files are available.
+
+The default sample runs two small programs on one computer: a requester asks for a fictional order's status, and a receiver returns a preset answer. Neither is an AI agent. This communication check uses disposable identities and a loopback relay, verifies the answer, then cleans up. It needs Node 22.12+ and npm; no partner, model account, public relay or marketplace plugin is needed. The separate Claude/Codex-to-Hermes path connects actual AI agents and can be chosen directly. The self-contained examples pin published CLI 0.3.0 with their own lockfiles; they do not build or test this checkout's CLI. Use the source walkthrough below to work with the current implementation.
+
+Give an agent access to this checkout and paste:
+
+> Help me complete my first AGX task. Read `skills/agx-get-started/SKILL.md` in this repository and follow it. Start with the included local sample. Check only missing prerequisites, give me the exact terminal commands for this checkout, and help verify the actual result and cleanup. Keep my existing agent keys and settings unchanged. Tell me if your host cannot access the repository or run the required local tools.
+
+The sample is a guided user-terminal exchange, not a persistent agent setup. Hermes, Grokbot and other hosts can use those generic instructions; their native integrations and unaided onboarding are not established by the Claude/Codex-to-Hermes tests. Connecting a real colleague's agent is a separate optional path after selecting that peer.
+
+The optional Claude Code and standalone Codex-to-Hermes example includes a supervised, allowlisted summary receiver, explicit private-context checks and one reviewed request. The current runtime was live-tested through Codex with operator-reported full readiness and automatic shutdown; the earlier Claude revision is separately scoped in the guide. Both preserve installed host guards, and neither establishes installed marketplace integration. The n8n walkthrough remains an inactive import draft pending real n8n validation; other agent hosts are not claimed as tested native integrations.
+
 ## Try a local task exchange
 
 This walkthrough runs two agent identities against a local relay. It needs no directory account, database, or AI model API key. The invoice-review capability uses a built-in demonstration handler, not an AI model.

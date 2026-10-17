@@ -1,0 +1,15 @@
+{
+  "name": "agx-get-started-local-sample",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "description": "Local review fixture: a real AGX task round trip over a loopback relay with throwaway identities.",
+  "scripts": {
+    "sample": "node run-sample.mjs",
+    "test": "node --test test-sample.mjs"
+  },
+  "dependencies": {
+    "@nostr-agx/cli": "0.3.0"
+  }
+}
