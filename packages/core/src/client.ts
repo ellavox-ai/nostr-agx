@@ -232,6 +232,38 @@ export class AgxClient {
 		payload: unknown,
 		opts?: { timeoutMs?: number },
 	): Promise<Output> {
+		const { result } = await this.sendRequest<Output>(
+			peer,
+			capability,
+			payload,
+			opts,
+		);
+		return result;
+	}
+
+	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
+	 * result, an unsupported capability, or timeout. */
+	async streamRequest<Output = unknown>(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		opts?: { timeoutMs?: number },
+	): Promise<StreamResponse<Output>> {
+		const { taskId } = await this.sendRequest<Output>(
+			peer,
+			capability,
+			payload,
+			opts,
+		);
+		return new StreamResponse<Output>(this.transport, taskId);
+	}
+
+	private async sendRequest<Output = unknown>(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		opts?: { timeoutMs?: number },
+	): Promise<{ taskId: string; result: Promise<Output> }> {
 		const taskId = randomId();
 		const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
 		const envelope: TaskRequestEnvelope = {
@@ -256,13 +288,13 @@ export class AgxClient {
 			const timer =
 				timeoutMs > 0
 					? setTimeout(() => {
-							this.pending.delete(taskId);
-							reject(
-								new Error(
-									`AGX request timed out after ${timeoutMs}ms`,
-								),
-							);
-						}, timeoutMs)
+						this.pending.delete(taskId);
+						reject(
+							new Error(
+								`AGX request timed out after ${timeoutMs}ms`,
+							),
+						);
+					}, timeoutMs)
 					: undefined;
 			this.pending.set(taskId, {
 				resolve: resolve as (o: unknown) => void,
@@ -290,7 +322,8 @@ export class AgxClient {
 				new Error(`AGX request: publish failed to ${peer}`),
 			);
 		}
-		return result;
+
+		return { taskId, result };
 	}
 
 	/** One poll → dispatch cycle. Drains inbound messages, dispatches task requests
@@ -957,5 +990,63 @@ export class AgxClient {
 		await this.transport.onReceipt?.(async (receipt: AgxIncomingReceipt) => {
 			await this.dispatchLiveEvent("receipt", receipt);
 		})
+	}
+}
+
+type StreamEvents<Output> = {
+	completed: (output: Output) => void;
+	statusUpdate: (status: "completed" | "delivered" | "failed") => void;
+	error: (error: string) => void;
+};
+
+
+/**
+ * A StreamResponse represents a streaming response from a task request. 
+ * It allows the caller to register event listeners for status updates, completion, and errors.
+ * Similar how the SendStreamingMessage is expected to work according to the A2A specification
+ */
+class StreamResponse<Output> {
+	private events = new Map<keyof StreamEvents<Output>, Array<StreamEvents<Output>[keyof StreamEvents<Output>]>>();
+
+	constructor(transport: AgxTransport, taskId: string) {
+		transport.onReceipt?.(async (receipt: AgxIncomingReceipt) => {
+			if (receipt.receipt.contextId === taskId) {
+				this.emit('statusUpdate', 'delivered');
+			}
+		});
+
+		transport.onMessage?.(async (msg: AgxIncomingMessage) => {
+			if (msg.contextId === taskId) {
+				const env = parseTaskEnvelope(msg.text)
+				if (env?.t === "res") {
+					if (env.status == 'failed') {
+						this.emit('statusUpdate', 'failed');
+						this.emit('error', env.error);
+						return
+					}
+					if (env.status == 'completed') {
+						this.emit('statusUpdate', 'completed');
+						this.emit('completed', env.output);
+						return
+					}
+				} else {
+					this.emit('error', 'TaskNotFoundError');
+				}
+			}
+		});
+	}
+
+	on(event: keyof StreamEvents<Output>, listener: (data: any) => void): StreamResponse<Output> {
+		const listeners = this.events.get(event) || [];
+		listeners.push(listener);
+		this.events.set(event, listeners);
+		return this;
+	}
+
+	private emit(event: keyof StreamEvents<Output>, data: any): void {
+		const listeners = this.events.get(event);
+		if (listeners) {
+			listeners.forEach((listener) => listener(data));
+		}
 	}
 }

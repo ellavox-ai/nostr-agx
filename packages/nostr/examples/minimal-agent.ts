@@ -60,14 +60,36 @@ async function main() {
 
 	// A real runtime would `await responder.start()` (advertise + poll on an
 	// interval). Here we drive `pump()` manually so the example exits cleanly.
-	const pending = initiator.request<{ approved: boolean }>(
+	// const pending = initiator.request<{ approved: boolean }>(
+	// 	responder.whoami(),
+	// 	"invoice.review",
+	// 	{ amount: 4200, vendor: "Globex" },
+	// );
+
+	// const result = await pending;
+	// console.info("invoice.review →", result); // { approved: true }
+
+	const stream = await initiator.streamRequest<{ approved: boolean }>(
 		responder.whoami(),
 		"invoice.review",
 		{ amount: 4200, vendor: "Globex" },
 	);
 
-	const result = await pending;
-	console.info("invoice.review →", result); // { approved: true }
+	await new Promise((resolve, reject) => {
+		stream.on("error", (err) => {
+			console.error("invoice.review error →", err);
+			reject(err);
+		});
+
+		stream.on("statusUpdate", status => {
+			console.log("invoice.review status →", status);
+		})
+
+		stream.on("completed", (output: { approved: boolean }) => {
+			console.log("invoice.review →", output);
+			resolve(undefined);
+		})
+	})
 }
 
 main().then(
