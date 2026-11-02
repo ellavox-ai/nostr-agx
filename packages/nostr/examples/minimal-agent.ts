@@ -66,19 +66,6 @@ async function main() {
 		{ amount: 4200, vendor: "Globex" },
 	);
 
-	// Pump both sides until the result lands. Publishing is not instant — each
-	// gift wrap is mined to a NIP-13 difficulty and routed via NIP-65 — so a
-	// single fixed sleep can race it.
-	let settled = false;
-	pending.finally(() => {
-		settled = true;
-	});
-	for (let i = 0; i < 40 && !settled; i++) {
-		await sleep(250);
-		await responder.pump(); // receive request → run handler → reply
-		await initiator.pump(); // receive the correlated result
-	}
-
 	const result = await pending;
 	console.info("invoice.review →", result); // { approved: true }
 }

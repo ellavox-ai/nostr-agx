@@ -175,6 +175,7 @@ export class AgxClient {
 		this.maxConcurrentTasks =
 			Number.isFinite(concurrent) && concurrent > 1 ? concurrent : 1;
 		this.cursor = opts.startCursor ?? 0;
+		this.startMessageListener()
 	}
 
 	/** This agent's identity (from the transport). */
@@ -877,5 +878,19 @@ export class AgxClient {
 			clearTimeout(p.timer);
 		}
 		p.reject(error);
+	}
+
+	private async startMessageListener(): Promise<void> {
+		await this.transport.onMessage?.(async (msg: AgxIncomingMessage) => {
+			if (this.ignore?.(msg) !== true) {
+				await this.dispatchMessage(msg)
+			}
+		});
+
+		await this.transport.onReceipt?.(async (receipt: AgxIncomingReceipt) => {
+			if (this.ignore?.(receipt) !== true) {
+				await this.onReceipt?.(receipt);
+			}
+		})
 	}
 }

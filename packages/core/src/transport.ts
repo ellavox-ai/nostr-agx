@@ -141,6 +141,10 @@ export interface AgxTransport {
 	/** Optional lifecycle hooks for bindings that hold connections. */
 	start?(): Promise<void>;
 	stop?(): Promise<void>;
+
+	/** Optional messages hooks for listening subscriptions. */
+	onMessage?(handler: (msg: AgxIncomingMessage) => void | Promise<void>): void | Promise<void>;
+	onReceipt?(handler: (receipt: AgxIncomingReceipt) => void | Promise<void>): void | Promise<void>;
 }
 
 export interface AgxIncomingMessage extends ParsedExchangeMessage {
