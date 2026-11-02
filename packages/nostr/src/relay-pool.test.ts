@@ -42,7 +42,7 @@ vi.mock("nostr-tools/relay", () => ({
 				filters: Filter[],
 				h: {
 					onevent: (e: Event) => void;
-					oneose: () => void;
+					oneose?: () => void;
 					onclose?: (reason: string) => void;
 				},
 			) {
@@ -57,7 +57,7 @@ vi.mock("nostr-tools/relay", () => ({
 						h.onevent(ev);
 					}
 					if (eose) {
-						h.oneose();
+						h.oneose?.();
 					}
 				});
 				return { close: vi.fn() };
@@ -76,6 +76,7 @@ import {
 	DEFAULT_POLL_LIMIT,
 	fetchByAuthor,
 	fetchByAuthorWithStatus,
+	listenEvents,
 	pollInbox,
 	publishToRelays,
 } from "./relay-pool";
@@ -106,6 +107,32 @@ beforeEach(() => {
 });
 afterEach(() => {
 	vi.useRealTimers();
+});
+
+describe("listenEvents", () => {
+	it("subscribes once per relay for gift wraps addressed to the requested pubkey", async () => {
+		const callback = vi.fn();
+		const subscriptions = await listenEvents(
+			undefined as never,
+			["wss://a", "wss://b"],
+			{ pubkey: ME },
+			callback,
+		);
+
+		expect(subscriptions).toHaveLength(2);
+		expect(sentFilters).toEqual([
+			{ kinds: [GIFT_WRAP_KIND], "#p": [ME] },
+			{ kinds: [GIFT_WRAP_KIND], "#p": [ME] },
+		]);
+		expect(callback).not.toHaveBeenCalled();
+	});
+
+	it("returns no subscriptions when no relays are configured", async () => {
+		await expect(
+			listenEvents(undefined as never, [], { pubkey: ME }, vi.fn()),
+		).resolves.toEqual([]);
+		expect(sentFilters).toEqual([]);
+	});
 });
 
 describe("pollInbox client-side filter re-enforcement (untrusted relay)", () => {

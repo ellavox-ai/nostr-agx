@@ -15,6 +15,7 @@ const resolvePeerRelays = vi.fn();
 vi.mock("./relay-pool", () => ({
 	publishToRelays: (...args: unknown[]) => publishToRelays(...args),
 	pollInbox: vi.fn(async () => ({ events: [], complete: true })),
+	listenEvents: vi.fn(async () => []),
 }));
 vi.mock("./discovery", async (importOriginal) => ({
 	...(await importOriginal<typeof import("./discovery")>()),

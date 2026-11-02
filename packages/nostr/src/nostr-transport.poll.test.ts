@@ -9,6 +9,7 @@ const pollInbox = vi.fn();
 vi.mock("./relay-pool", () => ({
 	publishToRelays: vi.fn(),
 	pollInbox: (...args: unknown[]) => pollInbox(...args),
+	listenEvents: vi.fn(async () => [])
 }));
 
 import { type Event, finalizeEvent, generateSecretKey } from "nostr-tools";
