@@ -502,6 +502,49 @@ describe("AgxClient task request/response", () => {
 		await bob.pump(); // same receipt redelivered in the overlap window
 		expect(onReceipt).toHaveBeenCalledTimes(1); // deduped via the SeenStore
 	});
+
+	it("dedupes a live subscription event against a concurrent poll", async () => {
+		const base = bus.transport(BOB);
+		let receiveLive: ((msg: AgxIncomingMessage) => void | Promise<void>) | undefined;
+		const transport: AgxTransport = {
+			...base,
+			onMessage(handler) {
+				receiveLive = handler;
+			},
+		};
+		let finishDispatch: () => void = () => undefined;
+		let startedDispatch: () => void = () => undefined;
+		const dispatchStarted = new Promise<void>((resolve) => {
+			startedDispatch = resolve;
+		});
+		const dispatchGate = new Promise<void>((resolve) => {
+			finishDispatch = resolve;
+		});
+		const onMessage = vi.fn(async () => {
+			startedDispatch();
+			await dispatchGate;
+		});
+		const bob = new AgxClient({ transport, onMessage });
+		bus.pushMessage(BOB, {
+			from: ALICE,
+			text: "live and polled",
+			contextId: "ctx",
+			messageId: "same-event",
+			subject: null,
+			autoDepth: null,
+			contentType: "application/a2a+json",
+		});
+		const [msg] = bus.inbox.get(BOB)!;
+
+		const live = receiveLive!(msg);
+		await dispatchStarted;
+		const polling = bob.pump();
+		finishDispatch();
+		await Promise.all([live, polling]);
+
+		expect(onMessage).toHaveBeenCalledTimes(1);
+		expect(await bob.pump()).toMatchObject({ dispatched: 0 });
+	});
 });
 
 describe("AgxClient polls far enough back for a backdating transport", () => {
