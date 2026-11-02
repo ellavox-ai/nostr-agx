@@ -10,6 +10,15 @@ importers:
 
   packages/cli:
     dependencies:
+      '@nostr-relay/common':
+        specifier: ^0.0.41
+        version: 0.0.41
+      '@nostr-relay/core':
+        specifier: ^0.0.41
+        version: 0.0.41(@nostr-relay/common@0.0.41)
+      '@nostr-relay/validator':
+        specifier: ^0.0.41
+        version: 0.0.41(@nostr-relay/common@0.0.41)
       '@orpc/client':
         specifier: 1.15.0
         version: 1.15.0(@opentelemetry/api@1.9.1)
@@ -616,9 +625,17 @@ packages:
     resolution: {integrity: sha512-bysYuiVfhxNJuldNXlFEitTVdNnYUc+XNJZd7Qm2a5j1vZHgY+fazadNFWFaMK/2vye0JVlxV3gHmC0WDfAOQw==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/curves@2.0.1':
     resolution: {integrity: sha512-vs1Az2OOTBiP4q0pwjW5aF0xp9n4MxVrmkFBxc6EKZc6ddYx5gaZiAsZoq0uRRXWbi3AT/sBqn05eRPtn1JCPw==}
     engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@noble/hashes@2.0.1':
     resolution: {integrity: sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw==}
@@ -627,6 +644,19 @@ packages:
   '@noble/hashes@2.4.0':
     resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
+
+  '@nostr-relay/common@0.0.41':
+    resolution: {integrity: sha512-l2o/f1If410TxtrnlRKl6u0qRiDDYZOBd4IBx/pBItkRuylpMX0Ub9Uq/f2iK+3Cygo59rVTW53tKM9X8qIDYw==}
+
+  '@nostr-relay/core@0.0.41':
+    resolution: {integrity: sha512-Uhgi5gD1cgazfIUq3qKsGEMMJwFsPh/FnKHTyphRNLvXZzVf9Bfoz+Z+07CcfQ8Q8hWkTRh1uvPinM9fuXDFTg==}
+    peerDependencies:
+      '@nostr-relay/common': '>=0.0.41'
+
+  '@nostr-relay/validator@0.0.41':
+    resolution: {integrity: sha512-QmhfYfKwY0j0Y1BNd8BTXdcSOsX9CVD8y6DCW4PEKjKNok+dSUE4qNWoNIcDoLhmqGAYyG8ifLjb3WPjk2HcBA==}
+    peerDependencies:
+      '@nostr-relay/common': '>=0.0.41'
 
   '@opentelemetry/api-logs@0.220.0':
     resolution: {integrity: sha512-CmVa4ImJ+ynfrPMNaAXHET6Bhb44SwzmfyVJFq9ni2jgXJR/l7C6gfVFddNmHP+ZOkP9cf4f9DBe68qVLTHc9w==}
@@ -1835,6 +1865,9 @@ packages:
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
 
+  rxjs@7.8.2:
+    resolution: {integrity: sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA==}
+
   safe-regex-test@1.1.0:
     resolution: {integrity: sha512-x/+Cz4YrimQxQccJf5mKEbIa1NzeCRNI5Ecl/ekmlYaampdNLPalVyIcCZNNH3MvmqBugV5TMYZXv0ljslUlaw==}
     engines: {node: '>= 0.4'}
@@ -2189,6 +2222,12 @@ packages:
     resolution: {integrity: sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==}
     engines: {node: '>=12'}
 
+  zod-validation-error@3.5.4:
+    resolution: {integrity: sha512-+hEiRIiPobgyuFlEojnqjJnhFvg4r/i3cqgcm67eehZf/WBaK3g6cD02YU9mtdVxZjv8CzCA9n/Rhrs3yAAvAw==}
+    engines: {node: '>=18.0.0'}
+    peerDependencies:
+      zod: ^3.24.4
+
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
@@ -2533,14 +2572,37 @@ snapshots:
 
   '@noble/ciphers@2.1.1': {}
 
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
   '@noble/curves@2.0.1':
     dependencies:
       '@noble/hashes': 2.0.1
+
+  '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.0.1': {}
 
   '@noble/hashes@2.4.0':
     optional: true
+
+  '@nostr-relay/common@0.0.41':
+    dependencies:
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+      rxjs: 7.8.2
+
+  '@nostr-relay/core@0.0.41(@nostr-relay/common@0.0.41)':
+    dependencies:
+      '@nostr-relay/common': 0.0.41
+      rxjs: 7.8.2
+
+  '@nostr-relay/validator@0.0.41(@nostr-relay/common@0.0.41)':
+    dependencies:
+      '@nostr-relay/common': 0.0.41
+      zod: 3.25.76
+      zod-validation-error: 3.5.4(zod@3.25.76)
 
   '@opentelemetry/api-logs@0.220.0':
     dependencies:
@@ -3809,6 +3871,10 @@ snapshots:
       '@rollup/rollup-win32-x64-msvc': 4.59.0
       fsevents: 2.3.3
 
+  rxjs@7.8.2:
+    dependencies:
+      tslib: 2.8.1
+
   safe-regex-test@1.1.0:
     dependencies:
       call-bound: 1.0.4
@@ -4228,6 +4294,10 @@ snapshots:
       string-width: 4.2.3
       y18n: 5.0.8
       yargs-parser: 21.1.1
+
+  zod-validation-error@3.5.4(zod@3.25.76):
+    dependencies:
+      zod: 3.25.76
 
   zod@3.25.76: {}
 
