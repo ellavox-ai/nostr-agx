@@ -137,6 +137,21 @@ async function waitFor<T>(check: () => T | undefined | false, timeoutMs = 20_000
 	}
 }
 
+async function waitForPeer<T>(check: () => T | undefined | false, client: AgxClient, timeoutMs = 20_000): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const value = check();
+		if (value) {
+			return value;
+		}
+		if (Date.now() > deadline) {
+			throw new Error("waitForPeer: condition not met in time");
+		}
+		await client.pump();
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
 function verify(received: Received, secret: string): boolean {
 	const timestamp = String(received.headers["x-agx-timestamp"]);
 	const expected = `v1=${createHmac("sha256", secret).update(`${timestamp}.${received.body}`).digest("hex")}`;
@@ -152,6 +167,25 @@ async function subscribe(body: Record<string, unknown>) {
 /** One task per webhook at a time, so a test can make one wait its turn. */
 function gatewayOptions() {
 	return { profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100], maxTasksPerWebhook: 1 };
+}
+
+async function backgroundTask(id: string) {
+	const res = await api(`/v1/tasks/${id}`);
+	expect(res.status).toBe(200);
+	return json(res);
+}
+
+async function settledBackgroundTask(id: string, client: AgxClient) {
+	return pumping((async () => {
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const view = await backgroundTask(id);
+			if (view.status === "completed" || view.status === "failed") {
+				return view;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		throw new Error(`Background task ${id} did not settle`);
+	})(), client);
 }
 
 beforeAll(async () => {
@@ -294,6 +328,350 @@ describe("agx gateway: outbound", () => {
 			supportsCapability: true,
 		});
 	}, 30_000);
+
+	it("runs one task for concurrent and completed idempotent retries", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });
+		let runs = 0;
+		let releaseFirst: () => void = () => undefined;
+		reviewer.client.handle("invoice.idempotent", async () => {
+			runs += 1;
+			if (runs === 1) {
+				await new Promise<void>((resolve) => {
+					releaseFirst = resolve;
+				});
+			}
+			return { run: runs };
+		});
+		const body = { peer: reviewer.npub, capability: "invoice.idempotent", payload: { amount: 42 }, timeoutSec: 20 };
+		const call = () => api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "invoice-42" },
+			body: JSON.stringify(body),
+		});
+		const first = call();
+		const concurrent = call();
+		await waitForPeer(() => runs === 1, reviewer.client);
+		releaseFirst();
+		const responses = await pumping(Promise.all([first, concurrent]), reviewer.client);
+		expect(responses.map((res) => res.status)).toEqual([200, 200]);
+		const outputs = await Promise.all(responses.map(json));
+		expect(outputs[0]).toMatchObject({ status: "completed", output: { run: 1 } });
+		expect(outputs[1]).toEqual(outputs[0]);
+
+		const reordered = { timeoutSec: 20, payload: { amount: 42 }, capability: "invoice.idempotent", peer: reviewer.npub };
+		const replay = await api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "invoice-42" },
+			body: JSON.stringify(reordered),
+		});
+		expect(replay.status).toBe(200);
+		expect(await json(replay)).toEqual(outputs[0]);
+		const conflict = await api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "invoice-42" },
+			body: JSON.stringify({ ...body, payload: { amount: 43 } }),
+		});
+		expect(conflict.status).toBe(409);
+		expect(await json(conflict)).toMatchObject({ error: { code: "idempotency_key_reused" } });
+		expect(runs).toBe(1);
+
+		const otherKey = createGatewayKey(profile, "other-credential").key;
+		const otherCredential = await pumping(api("/v1/tasks", {
+			method: "POST",
+			key: otherKey,
+			headers: { "idempotency-key": "invoice-42" },
+			body: JSON.stringify(body),
+		}), reviewer.client);
+		expect(otherCredential.status).toBe(200);
+		expect(await json(otherCredential)).toMatchObject({ output: { run: 2 } });
+		expect(runs).toBe(2);
+	}, 30_000);
+
+	it("keeps an idempotent task alive when its first caller disconnects", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.disconnect", async () => {
+			runs += 1;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: runs };
+		});
+		const body = JSON.stringify({ peer: reviewer.npub, capability: "invoice.disconnect", timeoutSec: 20 });
+		const gone = new AbortController();
+		const first = api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "disconnect-1" },
+			body,
+			signal: gone.signal,
+		});
+		await waitForPeer(() => runs === 1, reviewer.client);
+		gone.abort();
+		await expect(first).rejects.toThrow();
+		const retry = api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "disconnect-1" },
+			body,
+		});
+		release();
+		const res = await pumping(retry, reviewer.client);
+		expect(res.status).toBe(200);
+		expect(await json(res)).toMatchObject({ status: "completed", output: { run: 1 } });
+		expect(runs).toBe(1);
+	}, 30_000);
+
+	it("does not leak waiting slots when idempotency keys are invalid", async () => {
+		const reviewer = await peer({ authorize: "accept-all" });
+		reviewer.client.handle("invoice.invalid-key", () => ({ ok: true }));
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), maxTaskRequestsWaiting: 1 });
+		try {
+			for (const value of ["", "has space", "x".repeat(256)]) {
+				const invalid = await api("/v1/tasks", {
+					method: "POST",
+					headers: { "idempotency-key": value },
+					body: "{}",
+				});
+				expect(invalid.status).toBe(400);
+				expect(await json(invalid)).toMatchObject({ error: { code: "invalid_idempotency_key" } });
+			}
+			const valid = await pumping(api("/v1/tasks", {
+				method: "POST",
+				body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.invalid-key", timeoutSec: 20 }),
+			}), reviewer.client);
+			expect(valid.status).toBe(200);
+		} finally {
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 30_000);
+
+	it("releases a disconnected joiner's slot while the shared task keeps running", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.joiner-disconnect", async () => {
+			runs += 1;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: runs };
+		});
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), maxTaskRequestsWaiting: 2 });
+		const call = (signal?: AbortSignal) => api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "joiner-disconnect" },
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.joiner-disconnect", timeoutSec: 20 }),
+			signal,
+		});
+		try {
+			const first = call();
+			first.catch(() => undefined);
+			await waitForPeer(() => runs === 1, reviewer.client);
+			const gone = new AbortController();
+			const joiner = call(gone.signal);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			gone.abort();
+			await expect(joiner).rejects.toThrow();
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			const rejoined = call();
+			rejoined.catch(() => undefined);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			release();
+			const responses = await pumping(Promise.all([first, rejoined]), reviewer.client);
+			expect(responses.map((res) => res.status)).toEqual([200, 200]);
+			const outputs = await Promise.all(responses.map(json));
+			expect(outputs[0]).toMatchObject({ status: "completed", output: { run: 1 } });
+			expect(outputs[1]).toEqual(outputs[0]);
+			expect(runs).toBe(1);
+		} finally {
+			release();
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 30_000);
+
+	it("restores completed idempotent results and reports unresolved work after restart", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });
+		let completedRuns = 0;
+		reviewer.client.handle("invoice.saved", () => ({ run: ++completedRuns }));
+		const body = { peer: reviewer.npub, capability: "invoice.saved", timeoutSec: 20 };
+		const call = () => api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "restart-complete" },
+			body: JSON.stringify(body),
+		});
+		const first = await pumping(call(), reviewer.client);
+		expect(first.status).toBe(200);
+		expect(await json(first)).toMatchObject({ output: { run: 1 } });
+		await gateway.close();
+		gateway = await startGateway(gatewayOptions());
+		const restored = await call();
+		expect(restored.status).toBe(200);
+		expect(await json(restored)).toMatchObject({ output: { run: 1 } });
+		expect(completedRuns).toBe(1);
+
+		let pendingRuns = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.unknown", async () => {
+			pendingRuns += 1;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: pendingRuns };
+		});
+		const pendingBody = JSON.stringify({ peer: reviewer.npub, capability: "invoice.unknown", timeoutSec: 1 });
+		const pending = api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "restart-pending" },
+			body: pendingBody,
+		});
+		pending.catch(() => undefined);
+		await waitForPeer(() => pendingRuns === 1, reviewer.client);
+		await gateway.close();
+		await expect(pending).rejects.toThrow();
+		gateway = await startGateway(gatewayOptions());
+		const unknown = await api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "restart-pending" },
+			body: pendingBody,
+		});
+		expect(unknown.status).toBe(409);
+		expect(await json(unknown)).toMatchObject({ error: { code: "result_unknown" } });
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 1200));
+		const stillUnknown = await api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "restart-pending" },
+			body: pendingBody,
+		});
+		expect(stillUnknown.status).toBe(409);
+		expect(pendingRuns).toBe(1);
+	}, 45_000);
+
+	it("returns a background handle before completion and its stored result after reconnect", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.background", async () => {
+			runs += 1;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: runs };
+		});
+		const invalid = await api("/v1/tasks", {
+			method: "POST",
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background", background: "yes" }),
+		});
+		expect(invalid.status).toBe(400);
+		expect(await json(invalid)).toMatchObject({ error: { code: "invalid_request" } });
+		expect(runs).toBe(0);
+
+		const body = { peer: reviewer.npub, capability: "invoice.background", background: true, timeoutSec: 20 };
+		const call = () => api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "background-invoice-1" },
+			body: JSON.stringify(body),
+		});
+		const acceptedResponse = await call();
+		expect(acceptedResponse.status).toBe(202);
+		const accepted = await json(acceptedResponse);
+		const id = accepted.id as string;
+		expect(accepted).toMatchObject({ id, status: "running" });
+		expect(id).toMatch(/^task_[0-9a-f-]{36}$/);
+		expect(await backgroundTask(id)).toMatchObject({ id, status: "running" });
+		const otherKey = createGatewayKey(profile, "background-other-credential").key;
+		expect((await api(`/v1/tasks/${id}`, { key: otherKey })).status).toBe(404);
+		expect((await api("/v1/tasks/task_00000000-0000-0000-0000-000000000000")).status).toBe(404);
+
+		await waitForPeer(() => runs === 1, reviewer.client);
+		const duplicate = await call();
+		expect(duplicate.status).toBe(202);
+		expect(await json(duplicate)).toMatchObject({ id, status: "running" });
+		expect(runs).toBe(1);
+		release();
+		const completed = await settledBackgroundTask(id, reviewer.client);
+		expect(completed).toMatchObject({
+			id,
+			status: "completed",
+			result: {
+				peer: reviewer.npub,
+				capability: "invoice.background",
+				status: "completed",
+				output: { run: 1 },
+			},
+		});
+		expect(await backgroundTask(id)).toEqual(completed);
+		const replay = await call();
+		expect(replay.status).toBe(202);
+		expect(await json(replay)).toEqual(completed);
+		expect(runs).toBe(1);
+	}, 30_000);
+
+	it("restores completed and failed background outcomes after restart", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });
+		let completedRuns = 0;
+		reviewer.client.handle("invoice.background.saved", () => ({ run: ++completedRuns }));
+		const completedResponse = await api("/v1/tasks", {
+			method: "POST",
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.saved", background: true, timeoutSec: 20 }),
+		});
+		expect(completedResponse.status).toBe(202);
+		const completedId = (await json(completedResponse)).id as string;
+		const completed = await settledBackgroundTask(completedId, reviewer.client);
+		expect(completed).toMatchObject({ status: "completed", result: { output: { run: 1 } } });
+		await gateway.close();
+		gateway = await startGateway(gatewayOptions());
+		expect(await backgroundTask(completedId)).toEqual(completed);
+		expect(completedRuns).toBe(1);
+
+		reviewer.client.handle("invoice.background.failed", () => {
+			throw new Error("private failure detail");
+		});
+		const failedResponse = await api("/v1/tasks", {
+			method: "POST",
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.failed", background: true, timeoutSec: 20 }),
+		});
+		expect(failedResponse.status).toBe(202);
+		const failedId = (await json(failedResponse)).id as string;
+		const failed = await settledBackgroundTask(failedId, reviewer.client);
+		expect(failed).toMatchObject({ status: "failed", error: { code: "task_failed" } });
+		expect(JSON.stringify(failed)).not.toContain("private failure detail");
+		await gateway.close();
+		gateway = await startGateway(gatewayOptions());
+		expect(await backgroundTask(failedId)).toEqual(failed);
+	}, 45_000);
+
+	it("reports interrupted background work as unknown without rerunning it", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.background.unknown", async () => {
+			runs += 1;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: runs };
+		});
+		const acceptedResponse = await api("/v1/tasks", {
+			method: "POST",
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.unknown", background: true, timeoutSec: 20 }),
+		});
+		expect(acceptedResponse.status).toBe(202);
+		const id = (await json(acceptedResponse)).id as string;
+		await waitForPeer(() => runs === 1, reviewer.client);
+		await gateway.close();
+		gateway = await startGateway(gatewayOptions());
+		const unknown = await backgroundTask(id);
+		expect(unknown).toMatchObject({ id, status: "failed", error: { code: "result_unknown" } });
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 1200));
+		expect(await backgroundTask(id)).toEqual(unknown);
+		expect(runs).toBe(1);
+	}, 45_000);
 });
 
 describe("agx gateway: subscriptions", () => {

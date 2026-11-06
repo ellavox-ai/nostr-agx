@@ -64,12 +64,17 @@ function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** `POST /v1/tasks`: send a task to an agent and wait for its result. */
-export async function requestTask(
-	deps: OperationDeps,
-	input: unknown,
-	signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
+export interface TaskRequest {
+	peer: string;
+	npub: string;
+	capability: string;
+	payload: unknown;
+	timeoutSec: number;
+	checkCard: boolean;
+	background: boolean;
+}
+
+export function parseTaskRequest(input: unknown): TaskRequest {
 	const req = body(input);
 	const peer = peerOf(req.peer);
 	const npub = toNpub(peer);
@@ -80,27 +85,43 @@ export async function requestTask(
 	if (capability.length > MAX_CAPABILITY_CHARS) {
 		throw new ApiError(400, "invalid_request", `Capability names can be at most ${MAX_CAPABILITY_CHARS} characters`);
 	}
-	const payload = req.payload === undefined ? {} : req.payload;
-	const timeoutSec = integer(req.timeoutSec, "timeoutSec", 30, { min: 1, max: MAX_TASK_TIMEOUT_SEC });
+	if (req.background !== undefined && typeof req.background !== "boolean") {
+		throw new ApiError(400, "invalid_request", "background must be true or false");
+	}
+	return {
+		peer,
+		npub,
+		capability,
+		payload: req.payload === undefined ? {} : req.payload,
+		timeoutSec: integer(req.timeoutSec, "timeoutSec", 30, { min: 1, max: MAX_TASK_TIMEOUT_SEC }),
+		checkCard: req.checkCard === true,
+		background: req.background === true,
+	};
+}
 
-	if (req.checkCard === true) {
-		const { card, reachable } = await resolvePeerCardWithStatus(peer, deps.relays, deps.signer);
+export async function runTaskRequest(
+	deps: OperationDeps,
+	req: TaskRequest,
+	signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+	if (req.checkCard) {
+		const { card, reachable } = await resolvePeerCardWithStatus(req.peer, deps.relays, deps.signer);
 		if (!reachable) {
 			throw new ApiError(
 				503,
 				"relays_unreachable",
-				`No relay answered (${deps.relays.join(", ")}), so ${npub}'s card could not be read`,
+				`No relay answered (${deps.relays.join(", ")}), so ${req.npub}'s card could not be read`,
 				"Check the gateway's relays. Whether the agent advertises the capability is unknown until one of them answers.",
 			);
 		}
 		if (!card) {
-			throw new ApiError(404, "no_card", `No Agent Card found for ${npub}`, "Not every agent advertises one. Send without the card check to request anyway.");
+			throw new ApiError(404, "no_card", `No Agent Card found for ${req.npub}`, "Not every agent advertises one. Send without the card check to request anyway.");
 		}
-		if (!matchesCapability(card.capabilities, capability)) {
+		if (!matchesCapability(card.capabilities, req.capability)) {
 			throw new ApiError(
 				422,
 				"capability_not_advertised",
-				`${card.displayName ?? npub} does not advertise "${capability}"`,
+				`${card.displayName ?? req.npub} does not advertise "${req.capability}"`,
 				`Its card lists: ${card.capabilities.join(", ") || "no capabilities"}.`,
 			);
 		}
@@ -108,15 +129,15 @@ export async function requestTask(
 
 	let output: unknown;
 	try {
-		output = await deps.requester.request(peer, capability, payload, timeoutSec * 1000, signal);
+		output = await deps.requester.request(req.peer, req.capability, req.payload, req.timeoutSec * 1000, signal);
 	} catch (error) {
 		const message = messageOf(error);
 		if (message.startsWith("AGX request timed out")) {
 			throw new ApiError(
 				504,
 				"timeout",
-				`No result from ${npub} within ${timeoutSec} seconds`,
-				`AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${deps.npub}). Then check that it is running, serves "${capability}", and shares a relay with this agent or advertises its relays.`,
+				`No result from ${req.npub} within ${req.timeoutSec} seconds`,
+				`AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${deps.npub}). Then check that it is running, serves "${req.capability}", and shares a relay with this agent or advertises its relays.`,
 			);
 		}
 		if (message.startsWith("AGX request: encoded payload exceeds")) {
@@ -127,9 +148,9 @@ export async function requestTask(
 		}
 		// The peer's own failure report: an `AgxPublicError` message, or `handler
 		// failed` for an error it kept to itself.
-		throw new ApiError(502, "task_failed", `${npub} reported that the task failed: ${message}`);
+		throw new ApiError(502, "task_failed", `${req.npub} reported that the task failed: ${message}`);
 	}
-	return { peer: npub, capability, status: "completed", output };
+	return { peer: req.npub, capability: req.capability, status: "completed", output };
 }
 
 /** `POST /v1/messages`: send an encrypted message. */

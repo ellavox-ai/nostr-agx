@@ -38,6 +38,8 @@ import { dirname, join } from "node:path";
  *     profiles/<name>/gateway-subscriptions.json
  *                                         webhooks `agx gateway` delivers to,
  *                                         with their signing secrets
+ *     profiles/<name>/gateway-task-operations.json
+ *                                         idempotent and background task operations and outcomes
  */
 
 export function agxHome(): string {
@@ -88,6 +90,11 @@ export function gatewayKeysPath(profile: string): string {
 /** `agx gateway`'s webhook subscriptions, with their signing secrets. */
 export function gatewaySubscriptionsPath(profile: string): string {
 	return join(profileDir(profile), "gateway-subscriptions.json");
+}
+
+/** Idempotent task submissions and their retained outcomes. */
+export function gatewayTaskOperationsPath(profile: string): string {
+	return join(profileDir(profile), "gateway-task-operations.json");
 }
 
 export function ensureDir(dir: string): void {
