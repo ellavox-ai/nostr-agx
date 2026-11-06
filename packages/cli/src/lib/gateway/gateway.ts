@@ -27,6 +27,7 @@ import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
 import { ApiError, readJson, sendError, sendJson } from "./http.js";
+import { parseIdempotencyKey, TaskIdempotencyStore } from "./idempotency.js";
 import { verifyGatewayKey } from "./keys.js";
 import { type OperationDeps, readCard, requestTask, sendMessage } from "./operations.js";
 import { Requester } from "./requester.js";
@@ -75,6 +76,10 @@ export interface GatewayOptions {
 	/** Tasks the gateway runs or holds at once; past it, a task is answered
 	 * that the gateway is busy. Default 64. */
 	maxTasksInFlight?: number;
+	/** For tests: API task requests waiting for results. Default 256. */
+	maxTaskRequestsWaiting?: number;
+	/** For tests: keyed task operations still running after callers disconnect. Default 256. */
+	maxTaskOperationsInFlight?: number;
 }
 
 export interface RunningGateway {
@@ -155,6 +160,10 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				log(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
 		});
 		const subscriptions = new SubscriptionStore(name);
+		const taskOperations = new TaskIdempotencyStore(name, {
+			log,
+			maxInFlight: options.maxTaskOperationsInFlight ?? MAX_TASK_REQUESTS_WAITING,
+		});
 		const queue = new DeliveryQueue({
 			retryDelaysMs: options.deliveryRetryDelaysMs,
 			onFailure: (subscription, eventId, detail) =>
@@ -449,6 +458,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		};
 
 		let tasksWaiting = 0;
+		const maxTaskRequestsWaiting = options.maxTaskRequestsWaiting ?? MAX_TASK_REQUESTS_WAITING;
 		const route = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
 			const url = new URL(req.url ?? "/", "http://gateway");
 			const method = req.method ?? "GET";
@@ -488,28 +498,43 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				return;
 			}
 			if (method === "POST" && path === "/v1/tasks") {
+				const idempotencyKey = parseIdempotencyKey(req.headers["idempotency-key"]);
 				// Each one holds a connection and a result poll until it is answered.
-				if (tasksWaiting >= MAX_TASK_REQUESTS_WAITING) {
+				if (tasksWaiting >= maxTaskRequestsWaiting) {
 					throw new ApiError(
 						503,
 						"busy",
-						`${MAX_TASK_REQUESTS_WAITING} task requests are already waiting for results`,
+						`${maxTaskRequestsWaiting} task requests are already waiting for results`,
 						"Try again shortly.",
 					);
 				}
 				tasksWaiting += 1;
-				// A caller that goes away (n8n gave up, a proxy timed out) stops the wait.
+				let released = false;
+				const releaseWaiting = () => {
+					if (!released) {
+						released = true;
+						tasksWaiting -= 1;
+					}
+				};
 				const gone = new AbortController();
 				res.on("close", () => {
 					if (!res.writableFinished) {
-						gone.abort();
+						// Only work without a key belongs to this one HTTP caller. Every
+						// disconnected caller stops consuming a waiting slot immediately.
+						if (idempotencyKey === null) {
+							gone.abort();
+						}
+						releaseWaiting();
 					}
 				});
 				try {
 					const body = await readJson(req);
-					sendJson(res, 200, await requestTask(deps, body, gone.signal));
+					const output = idempotencyKey === null
+						? await requestTask(deps, body, gone.signal)
+						: await taskOperations.execute(bearer(req), idempotencyKey, body, () => requestTask(deps, body));
+					sendJson(res, 200, output);
 				} finally {
-					tasksWaiting -= 1;
+					releaseWaiting();
 				}
 				return;
 			}
@@ -604,6 +629,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				server.close(() => resolve());
 				server.closeAllConnections();
 			});
+			try {
+				taskOperations.close();
+			} catch (error) {
+				log(`task outcomes could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			requester.stop();
 			// One budget for the whole stop, under the 10 s a container runtime
 			// gives before it kills the process.
