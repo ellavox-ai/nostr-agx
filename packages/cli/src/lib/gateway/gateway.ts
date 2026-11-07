@@ -27,10 +27,12 @@ import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
 import { ApiError, readJson, sendError, sendJson } from "./http.js";
+import { parseIdempotencyKey, TaskOperationStore } from "./idempotency.js";
 import { verifyGatewayKey } from "./keys.js";
-import { type OperationDeps, readCard, requestTask, sendMessage } from "./operations.js";
+import { type OperationDeps, parseTaskRequest, readCard, runTaskRequest, sendMessage } from "./operations.js";
 import { Requester } from "./requester.js";
 import { KeyedSlots } from "./slots.js";
+import { TaskEventStream, TaskEventStreams } from "./task-events.js";
 import {
 	assertWebhookHost,
 	parseSubscriptionInput,
@@ -75,6 +77,14 @@ export interface GatewayOptions {
 	/** Tasks the gateway runs or holds at once; past it, a task is answered
 	 * that the gateway is busy. Default 64. */
 	maxTasksInFlight?: number;
+	/** For tests: API task requests waiting for results. Default 256. */
+	maxTaskRequestsWaiting?: number;
+	/** For tests: keyed task operations still running after callers disconnect. Default 256. */
+	maxTaskOperationsInFlight?: number;
+	/** For tests: background task operations running at once. Default 64. */
+	maxBackgroundTasksInFlight?: number;
+	/** SSE comment heartbeat interval. Default 15000. */
+	taskSseHeartbeatMs?: number;
 }
 
 export interface RunningGateway {
@@ -121,6 +131,91 @@ function bearer(req: IncomingMessage): string {
 	return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
 }
 
+function serveTaskEvents(
+	req: IncomingMessage,
+	res: ServerResponse,
+	id: string,
+	taskOperations: TaskOperationStore,
+	taskEvents: TaskEventStreams,
+	heartbeatMs: number,
+): void {
+	const initial = taskOperations.get(bearer(req), id);
+	if (initial === null) {
+		throw new ApiError(404, "not_found", "No background task with that ID for this credential");
+	}
+	const stream = taskEvents.ensure(id);
+	const refreshTerminal = () => {
+		const view = taskOperations.get(bearer(req), id);
+		if (view !== null) {
+			stream.complete(view);
+		}
+	};
+	refreshTerminal();
+	const parsedLastId = Number(req.headers["last-event-id"] ?? 0);
+	let lastId = Number.isSafeInteger(parsedLastId) && parsedLastId > 0 ? parsedLastId : 0;
+	let finished = false;
+	let terminalTimer: ReturnType<typeof setInterval> | undefined;
+	let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+	const cleanup = () => {
+		if (finished) {
+			return;
+		}
+		finished = true;
+		if (terminalTimer) {
+			clearInterval(terminalTimer);
+		}
+		if (heartbeatTimer) {
+			clearInterval(heartbeatTimer);
+		}
+	};
+	const finish = () => {
+		cleanup();
+		res.end();
+	};
+	const writeEvents = () => {
+		const writeEvent = (event: ReturnType<TaskEventStream["after"]>[number]) => {
+			res.write(`id: ${event.id}\nevent: ${event.event}\ndata: ${JSON.stringify({ taskId: id, ...event.data })}\n\n`);
+			lastId = event.id;
+		};
+		const events = stream.after(lastId);
+		for (const event of events) {
+			writeEvent(event);
+		}
+		const terminal = stream.terminalEvent();
+		if (terminal && !events.some((event) => event.id === terminal.id)) {
+			writeEvent(terminal);
+		}
+		if (terminal) {
+			finish();
+		}
+	};
+
+	res.writeHead(200, {
+		"content-type": "text/event-stream; charset=utf-8",
+		"cache-control": "no-store, no-transform",
+		"connection": "keep-alive",
+		"x-accel-buffering": "no",
+		"x-content-type-options": "nosniff",
+		"retry": "1000",
+	});
+	res.write(": connected\n\n");
+	res.on("close", cleanup);
+	terminalTimer = setInterval(() => {
+		try {
+			refreshTerminal();
+			writeEvents();
+		} catch {
+			finish();
+		}
+	}, 250);
+	heartbeatTimer = setInterval(() => {
+		if (!res.writableEnded) {
+			res.write(": heartbeat\n\n");
+		}
+	}, heartbeatMs);
+	writeEvents();
+}
+
 export async function startGateway(options: GatewayOptions): Promise<RunningGateway> {
 	const name = options.profile;
 	const log = options.log ?? (() => undefined);
@@ -155,6 +250,12 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				log(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
 		});
 		const subscriptions = new SubscriptionStore(name);
+		const taskOperations = new TaskOperationStore(name, {
+			log,
+			maxInFlight: options.maxTaskOperationsInFlight ?? MAX_TASK_REQUESTS_WAITING,
+			maxBackgroundInFlight: options.maxBackgroundTasksInFlight,
+		});
+		const taskEvents = new TaskEventStreams();
 		const queue = new DeliveryQueue({
 			retryDelaysMs: options.deliveryRetryDelaysMs,
 			onFailure: (subscription, eventId, detail) =>
@@ -449,6 +550,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		};
 
 		let tasksWaiting = 0;
+		const maxTaskRequestsWaiting = options.maxTaskRequestsWaiting ?? MAX_TASK_REQUESTS_WAITING;
 		const route = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
 			const url = new URL(req.url ?? "/", "http://gateway");
 			const method = req.method ?? "GET";
@@ -487,29 +589,88 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				});
 				return;
 			}
+			const eventRoute = /^\/v1\/tasks\/([^/]+)\/events$/.exec(path);
+			if (method === "GET" && eventRoute) {
+				serveTaskEvents(
+					req,
+					res,
+					decodeURIComponent(eventRoute[1]),
+					taskOperations,
+					taskEvents,
+					Math.max(10, options.taskSseHeartbeatMs ?? 15_000),
+				);
+				return;
+			}
+			const task = /^\/v1\/tasks\/([^/]+)$/.exec(path);
+			if (method === "GET" && task) {
+				const output = taskOperations.get(bearer(req), decodeURIComponent(task[1]));
+				if (output === null) {
+					throw new ApiError(404, "not_found", "No background task with that ID for this credential");
+				}
+				sendJson(res, 200, output);
+				return;
+			}
 			if (method === "POST" && path === "/v1/tasks") {
-				// Each one holds a connection and a result poll until it is answered.
-				if (tasksWaiting >= MAX_TASK_REQUESTS_WAITING) {
+				const idempotencyKey = parseIdempotencyKey(req.headers["idempotency-key"]);
+				// Each one holds a connection; synchronous requests also hold a result poll.
+				if (tasksWaiting >= maxTaskRequestsWaiting) {
 					throw new ApiError(
 						503,
 						"busy",
-						`${MAX_TASK_REQUESTS_WAITING} task requests are already waiting for results`,
+						`${maxTaskRequestsWaiting} task requests are already waiting for results`,
 						"Try again shortly.",
 					);
 				}
 				tasksWaiting += 1;
-				// A caller that goes away (n8n gave up, a proxy timed out) stops the wait.
+				let released = false;
+				const releaseWaiting = () => {
+					if (!released) {
+						released = true;
+						tasksWaiting -= 1;
+					}
+				};
 				const gone = new AbortController();
 				res.on("close", () => {
 					if (!res.writableFinished) {
-						gone.abort();
+						// Only synchronous work without a key uses this abort signal. Every
+						// disconnected caller stops consuming a waiting slot immediately.
+						if (idempotencyKey === null) {
+							gone.abort();
+						}
+						releaseWaiting();
 					}
 				});
 				try {
 					const body = await readJson(req);
-					sendJson(res, 200, await requestTask(deps, body, gone.signal));
+					const taskRequest = parseTaskRequest(body);
+					const operation = () => runTaskRequest(deps, taskRequest);
+					if (taskRequest.background) {
+						const pendingEvents = new TaskEventStream();
+						const backgroundOperation = () => runTaskRequest(
+							deps,
+							taskRequest,
+							undefined,
+							(update) => pendingEvents.push(update),
+						);
+						const submitted = taskOperations.submit(
+							bearer(req),
+							idempotencyKey,
+							body,
+							backgroundOperation,
+						);
+						if (typeof submitted.id !== "string") {
+							throw new Error("Background task store returned no public task ID");
+						}
+						taskEvents.ensure(submitted.id, pendingEvents);
+						sendJson(res, 202, submitted);
+						return;
+					}
+					const output = idempotencyKey === null
+						? await runTaskRequest(deps, taskRequest, gone.signal)
+						: await taskOperations.execute(bearer(req), idempotencyKey, body, operation);
+					sendJson(res, 200, output);
 				} finally {
-					tasksWaiting -= 1;
+					releaseWaiting();
 				}
 				return;
 			}
@@ -604,6 +765,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				server.close(() => resolve());
 				server.closeAllConnections();
 			});
+			try {
+				taskOperations.close();
+			} catch (error) {
+				log(`task outcomes could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			requester.stop();
 			// One budget for the whole stop, under the 10 s a container runtime
 			// gives before it kills the process.

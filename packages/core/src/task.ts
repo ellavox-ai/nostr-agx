@@ -8,8 +8,8 @@ import { z } from "zod";
  * while `AgxClient` interprets the lifecycle + correlation.
  */
 
-/** Task lifecycle states (A2A-aligned). v1 drives the terminal states via the
- * result envelope; `working` / `input-required` are reserved for status updates. */
+/** Task lifecycle states (A2A-aligned). Terminal states use the result envelope;
+ * `working` uses status updates; `input-required` remains reserved. */
 export type TaskState =
 	| "submitted"
 	| "working"
@@ -41,9 +41,21 @@ export const taskResultSchema = z.object({
 });
 export type TaskResultEnvelope = z.infer<typeof taskResultSchema>;
 
+/** Nonterminal progress for a pending task. */
+export const taskStatusSchema = z.object({
+	t: z.literal("status"),
+	taskId: z.string().min(1).max(200),
+	status: z.literal("working"),
+	seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+	message: z.string().max(2000).optional(),
+});
+export type TaskStatusEnvelope = z.infer<typeof taskStatusSchema>;
+export type TaskStatusUpdate = Omit<TaskStatusEnvelope, "t">;
+
 export const taskEnvelopeSchema = z.discriminatedUnion("t", [
 	taskRequestSchema,
 	taskResultSchema,
+	taskStatusSchema,
 ]);
 export type TaskEnvelope = z.infer<typeof taskEnvelopeSchema>;
 
@@ -67,6 +79,9 @@ export interface Task<Payload = unknown> {
 	/** When the sender says it sent the request (unix seconds), if the transport
 	 * carries that. Sender-declared. */
 	sentAt?: number;
+	/** Publish a best-effort public `working` update. Client-created tasks always
+	 * provide this; optional for host-created task fixtures. */
+	report?: (message?: string) => Promise<void>;
 }
 
 /** Serialize a task envelope for the message text field. */

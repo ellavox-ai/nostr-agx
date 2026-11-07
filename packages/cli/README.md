@@ -406,7 +406,9 @@ proxy or tunnel, because the key and every task payload cross that connection.
 | --- | --- |
 | `GET /v1/health` | no key: `200` while polls of the relays keep finishing, `503` before the first and once none has for a minute; `allRelaysAnswering` |
 | `GET /v1/identity` | the agent's `npub`, `pubkey`, relays, organization and NIP-05 address |
-| `POST /v1/tasks` | `{ peer, capability, payload?, timeoutSec?, checkCard? }`: request a task and wait for its result, up to an hour (default 30 s) |
+| `POST /v1/tasks` | `{ peer, capability, payload?, timeoutSec?, checkCard?, background? }`: request a task and wait for its result, up to an hour (default 30 s), or use `background: true` to get a task ID with `202` |
+| `GET /v1/tasks/<id>` | read a background task's status and stored result or failure, scoped to the API credential that submitted it |
+| `GET /v1/tasks/<id>/events` | stream ordered `working` updates and the stored terminal view as Server-Sent Events (SSE) |
 | `POST /v1/messages` | `{ peer, text, subject?, contextId?, autoDepth?, maxAutoDepth?, maxPerConversation?, maxPerHour? }`: send a message; an automated reply (`autoDepth` above 0) is refused past 8 deep, 20 per conversation or 60 per agent per hour, unless those limits are given |
 | `GET /v1/agents/<npub>?capability=&verifyNip05=` | read an agent's card, and whether it advertises a capability |
 | `GET` / `POST /v1/subscriptions`, `GET` / `DELETE /v1/subscriptions/<id>` | the webhooks the gateway delivers to |
@@ -414,6 +416,86 @@ proxy or tunnel, because the key and every task payload cross that connection.
 An error is `{ "error": { "code", "message", "description"? } }` with a matching status: `504` for
 a task nobody answered — the usual sign that the agent has not allowed this one — and `401` for a
 missing or revoked key.
+
+### Idempotent task submission
+
+`POST /v1/tasks` accepts an optional `Idempotency-Key` header of 1–255 visible ASCII characters.
+For one API credential, the same key and canonically identical JSON body share one in-flight AGX
+request and return the same stored outcome. Object-key order does not matter. A key reused with a
+different body gets `409 idempotency_key_reused`; another credential has an independent key scope.
+
+Outcomes are kept for up to 24 hours, with at most 100 retained operations per API credential and
+1,000 per profile. At either cap, the gateway evicts the oldest settled outcome. Reusing an evicted
+key starts new work, and an evicted public ID returns `404`. If every operation at the cap is still
+running, a new submission gets `503 idempotency_store_full`. The complete operation store is also capped at
+16 MiB, with the same oldest-settled eviction policy.
+
+At most 256 keyed synchronous operations and 64 background operations run at once, including
+operations whose callers disconnected. Further distinct submissions get `503 busy`; a retry of a
+running key still joins it. These limits count running work, not open HTTP connections or daily
+submission totals.
+
+Each synchronous stored outcome is capped at 16 KiB. Callers attached to a run that returns a larger
+outcome still receive it; later retries get `409 outcome_not_retained` instead of executing the task
+again. Background outcomes are capped at 1 MiB. A background task with an outcome over that limit
+becomes `failed` with `outcome_not_retained`.
+
+The gateway records an operation before publishing it. If the gateway stops before recording the
+outcome, retries get `409 result_unknown` instead of executing possibly duplicate work. Check the
+remote agent's effects before using a different key. Validation and card-resolution failures that prove
+no task was sent are not retained for synchronous callers, so the same key can retry after the cause is
+fixed. A background public ID remains available as `failed` with the real error, while its idempotency
+key is freed for a retry with a new public ID. Publish failures, timeouts and remote task failures are
+retained and replayed: a relay may have stored a task even when publishing reports failure, so remote
+execution is uncertain.
+
+An individual HTTP disconnect does not cancel an idempotent operation or keep its waiting slot.
+Synchronous requests without the header retain the existing caller-abandon behavior. If the operation
+store is unreadable, the gateway moves it to `gateway-task-operations.json.corrupt`, logs the path,
+and starts with an empty store.
+
+This prevents duplicate submission through one gateway while its outcome remains retained; it does
+not prove exactly-once execution after an uncertain remote crash or after an outcome is evicted.
+
+### Background task results
+
+With `"background": true`, `POST /v1/tasks` validates the request, stores the operation, starts it,
+and answers `202` before remote completion:
+
+```json
+{ "id": "task_…", "status": "running", "createdAt": "…", "updatedAt": "…" }
+```
+
+The work continues after the caller disconnects. `GET /v1/tasks/<id>` with the same API credential
+returns `200` and the current `running`, `completed`, or `failed` view with ISO timestamps. A
+completed view has `result`, containing the same body a synchronous task submission returns. A
+failed lookup itself succeeds with `200`; its `error` contains the stored `code`, `message`, and
+optional `description`. An unknown, evicted, or another credential's ID gets `404`.
+
+An optional idempotency key makes background retries return the same task ID without publishing
+another AGX request, except after a retryable pre-publish failure as described above. Retained
+completed and failed views survive gateway restart for the same 24-hour retention period. An
+operation interrupted before its outcome was recorded becomes `failed` with `result_unknown`; the
+gateway does not execute it again automatically.
+
+### Task event streams
+
+`GET /v1/tasks/<id>/events` with the same API credential returns `text/event-stream`. Each `working`
+event has a numeric SSE `id` and the remote update's `seq` and optional public `message`. A comment
+heartbeat keeps idle connections alive. The stream ends with one `completed` or `failed` event whose
+data is the stored task view. For example:
+
+```bash
+curl -N -H "Authorization: Bearer $AGX_GATEWAY_KEY" \
+  http://127.0.0.1:8787/v1/tasks/task_…/events
+```
+
+On reconnect, send `Last-Event-ID: <last-id>` to skip already received events. The gateway retains at
+most 128 intermediate events per task and 1,000 in-memory streams for up to 24 hours. Intermediate
+replay is bounded and does not survive restart; the stored terminal view is authoritative and is
+always available without rerunning the task. Closing an SSE connection does not cancel remote work.
+Responses include `Cache-Control: no-store, no-transform` and `X-Accel-Buffering: no`; proxies must
+also be configured not to buffer SSE.
 
 ### Subscriptions
 
@@ -443,9 +525,9 @@ multicast or unspecified address, such as a cloud metadata service.
 - **A message or receipt** is POSTed to every subscription that wants it, in the background, two
   at a time per webhook with 30 seconds for each answer, and retried three times over about 40
   seconds when the webhook is unreachable or answers `429`, `502`, `503` or `504`.
-- **An answer over 1 MiB** is not read: the requester gets "result too large". Up to 256 task
-  requests through the API wait at once (more get `503`), and one whose caller disconnects stops
-  waiting.
+- **An answer over 1 MiB** is not read: the requester gets "result too large". Up to 256 synchronous
+  HTTP task requests wait at once (more get `503`). Without an idempotency key, one whose caller
+  disconnects stops waiting; idempotent and background operations continue.
 
 Every delivery is signed with the subscription's secret, which `POST /v1/subscriptions` returns
 once: `x-agx-signature` is `v1=` and the hex HMAC-SHA256 of `"<x-agx-timestamp>.<body>"`. Check
@@ -509,7 +591,18 @@ before sending anything.
 agx card <npub>            # read any agent's card
 agx card <npub> --verify   # check its claimed NIP-05 against the domain itself
 agx card <npub> --raw      # plus the raw signed event
+agx card <npub> --skill invoice.review  # one typed skill + formatted input/output schemas
 ```
+
+Cards with typed `skills` or `extensions` use format version `1.1.0`; legacy-only cards stay `1.0.0`.
+The normal card view summarizes skills and extensions. `--skill` selects a concrete skill ID and prints
+its description, tags, modes, features, and schemas. With `--json`, validated data is under
+`typedMetadata`, the selected skill is under `selectedSkill`, and any fallback has a machine-readable
+`typedMetadata.warning`. The original signed `card` and `event` remain available unchanged.
+
+Invalid typed metadata does not hide legacy capabilities. Unknown optional extensions are displayed;
+unknown required extensions hide typed skills and produce a warning. Schemas are public inspection
+metadata, not payload validation or proof of agent quality. This version never fetches schema references.
 
 ### A card cannot certify itself
 
@@ -709,6 +802,8 @@ on their behalf.
   profiles/<name>/gateway-keys.json   `agx gateway` API keys, as SHA-256 hashes
   profiles/<name>/gateway-subscriptions.json
                                       webhooks `agx gateway` delivers to, with their signing secrets
+  profiles/<name>/gateway-task-operations.json
+                                      idempotent and background task operations and retained outcomes
 ```
 
 `credentials.json` and `pending-login.json` are secrets: never paste, upload or

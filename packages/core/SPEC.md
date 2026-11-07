@@ -126,12 +126,23 @@ them like any message:
 
 - **request** — `{ t: "req", taskId, capability, payload }`. `payload` is arbitrary JSON the handler
   interprets (payload-agnostic).
+- **status** — `{ t: "status", taskId, status: "working", seq, message? }`, a nonterminal public
+  progress update correlated to the request by `taskId` and ordered by `seq` starting at 1.
 - **result** — `{ t: "res", taskId, status: "completed" | "failed", output?, error? }`, correlated to
   the request by `taskId`.
 
 States: `submitted → working → input-required → completed | failed | canceled`. A handler returning a
 value transitions the task to `completed` (its return is `output`); a handler that throws transitions
-to `failed`. `working` / `input-required` are reserved for status updates.
+to `failed`. `working` is available through status updates; `input-required` remains reserved.
+
+A handler calls `task.report(message?)` to publish best-effort `working` updates. A requester supplies
+`onTaskStatus` to receive them while its original request remains pending. Updates bind to both task
+ID and original peer. Duplicate or older sequence numbers are ignored; a later terminal result still
+settles the request normally. Status updates do not extend the request deadline. Messages are limited
+to 2,000 characters and contain handler-supplied public text, never raw reasoning or internal error
+details. Transport failure drops an update without failing the task. Unknown, late, and post-terminal
+status traffic receives no automatic reply and follows the plain-message trust path. Typed contracts
+advertise the `working` feature; this is not token-by-token model streaming.
 
 **Error boundary.** A `failed` result crosses trust domains, so a thrown handler error is reported to
 the peer **generically** (`handler failed`) and the real message is logged locally — an internal
@@ -147,6 +158,79 @@ An agent's Agent Card lists the `capabilities` it handles (the set of registered
 are dot-namespaced (`invoice.review`). A `.*` suffix advertises a namespace wildcard (`invoice.*`
 matches `invoice.review`); `*` advertises all. An initiator selects a peer whose card satisfies the
 requested capability before sending.
+
+### Typed skills and extensions (Agent Card format 1.1.0)
+
+A publisher MAY add `skills` and `extensions` to the same signed, unencrypted kind `11337` card. A card
+with either field uses human-readable format `version: "1.1.0"`; `v` remains `1`, and cards without
+either field remain `1.0.0`. Legacy `capabilities` remains explicit: skill IDs are not copied into it
+automatically, and typed metadata does not change wildcard matching or peer selection.
+
+Each skill has a concrete `id` (not `*` or a `.*` wildcard), a public `description`, and optional
+`tags`, `inputModes`, `outputModes`, `inputSchema`, `outputSchema`, and `features`. Modes are media
+types for the inner task payload and result; they do not change the AGX envelope or add artifact
+transport. Feature labels advertise behavior rather than enabling it; client-created typed contracts
+include `working` because their handlers can report status. Schemas are inline metadata and MAY also
+drive local task input/output validation as specified below.
+
+Each extension has a stable `uri` and optional `required` (default `false`). AGX-namespaced identifiers
+such as `agx.task-status.v1` are recommended. An unknown optional extension is retained and does not
+affect typed skills. An unknown required extension hides all typed skills and returns an
+`unsupported_required_extension` warning; its extension declaration remains visible and legacy fields
+remain usable. The reference implementation currently recognizes no required extension URIs. A
+publisher MUST omit a skill from legacy `capabilities` when legacy interaction with it would be unsafe.
+
+Legacy fields are parsed independently. Malformed, duplicate, oversized, or unsupported typed metadata
+MUST NOT hide valid legacy `org`, `nip05`, or `capabilities`. The typed `skills` and `extensions` unit
+is rejected as a whole with an `invalid_typed_metadata` warning rather than exposing a partial contract.
+No parser may fetch a schema or follow a reference. A signature proves only which key published these
+public claims, not their correctness, safety, quality, or current availability. Cards MUST NOT contain
+credentials, private endpoints, confidential examples, or other secrets.
+
+The inline JSON Schema 2020-12 subset permits `type`, `properties`, `required`,
+`additionalProperties`, `items`, `enum`, `const`, `minLength`, `maxLength`, `minimum`, `maximum`,
+`exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minItems`, `maxItems`, `uniqueItems`,
+`minProperties`, and `maxProperties`. Other keywords, including `$ref`, `$schema`, `$id`, `pattern`,
+`format`, and `patternProperties`, invalidate the typed unit. Schemas are objects, not boolean schemas;
+remote references and format assertions are not supported.
+
+| Bound | Limit |
+|---|---:|
+| Skills per card | 64 |
+| Extensions per card | 32 |
+| Skill ID | 200 characters |
+| Skill description | 1,000 characters |
+| Tags per skill / characters per tag | 16 / 64 |
+| Input or output modes per skill / characters per mode | 8 each / 128 |
+| Features per skill / characters per feature | 16 / 200 |
+| Extension URI | 512 characters |
+| Inline schema | 16 KiB UTF-8 each |
+| Combined serialized typed metadata | 64 KiB UTF-8 |
+| Schema nesting depth | 16 |
+| Total object properties per schema | 256 |
+| Total schema nodes | 512 |
+| Validated payload nesting depth | 64 |
+| Validated payload nodes | 16,384 |
+
+### Typed payload validation
+
+A handler MAY register an `AgxTaskContract` containing the typed skill fields other than `id`. The
+reference client rejects unsupported local schemas at registration and includes registered contracts
+in discovery metadata while retaining the same legacy capability keys. Existing handlers without a
+contract retain their previous behavior.
+
+`request(..., { validate: true })` opts into requester preflight. The client resolves the peer card,
+selects the exact typed skill ID, and rejects a payload that violates its `inputSchema` before
+publishing. A missing card, typed skill, or input schema skips preflight; this option performs no
+schema-driven fetch beyond normal peer-card resolution.
+
+After authorization succeeds, a receiver with an input schema validates before invoking its handler.
+Invalid input produces only the safe `invalid_input` failure; detailed paths remain in local logs.
+Denied requesters receive no validation response and follow the normal plain-message trust path.
+A handler result that violates its registered `outputSchema` produces `invalid_output` instead of a
+completed result. Structured error codes and requester-side validation of remote results remain
+outside this change. Validation uses only the bounded inline subset above and never evaluates schema
+text as code.
 
 **Unhandled task traffic (normative).** Because the payload `contentType` is peer-supplied, a
 task-labelled message is not proof of task intent. A responder **MUST** consume a message as a task

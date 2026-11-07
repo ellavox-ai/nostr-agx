@@ -22,6 +22,7 @@ import {
 	signCardEvent,
 	signRelayListEvent,
 } from "./discovery";
+import type { AgentCardExtension, AgentSkill } from "./typed-card";
 import {
 	AgxPayloadTooLargeError,
 	exchangeMessagePlaintextBytes,
@@ -743,16 +744,22 @@ export class NostrTransport implements AgxTransport {
 			: null;
 	}
 
-	/** Advertise capabilities via the Agent Card (implements `AgxTransport.advertise`). */
+	/** Advertise capabilities and optional typed skills via the Agent Card. */
 	async advertise(
 		capabilities: string[],
-		meta?: { org?: string; nip05?: string | null; payloadTypes?: string[] },
+		meta?: {
+			org?: string;
+			nip05?: string | null;
+			payloadTypes?: string[];
+			skills?: AgentSkill[];
+		},
 	): Promise<{ ok: boolean }> {
 		return this.publishDiscovery({
 			org: meta?.org ?? "agent",
 			capabilities,
 			payloadTypes: meta?.payloadTypes ?? ["application/a2a+json"],
 			nip05: meta?.nip05 ?? null,
+			skills: meta?.skills,
 		});
 	}
 
@@ -764,6 +771,8 @@ export class NostrTransport implements AgxTransport {
 		payloadTypes: string[];
 		nip05?: string | null;
 		encryption?: string[];
+		skills?: AgentSkill[];
+		extensions?: AgentCardExtension[];
 	}): Promise<{ ok: boolean }> {
 		const card: AgentCard = buildCard({
 			org: params.org,
@@ -773,6 +782,8 @@ export class NostrTransport implements AgxTransport {
 			capabilities: params.capabilities,
 			payloadTypes: params.payloadTypes,
 			encryption: params.encryption,
+			skills: params.skills,
+			extensions: params.extensions,
 		});
 		const now = nowSec();
 		const a = await publishToRelays(
