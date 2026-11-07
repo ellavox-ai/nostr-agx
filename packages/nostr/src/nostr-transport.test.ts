@@ -445,3 +445,33 @@ describe("publishReceipt routes to peer relays", () => {
 		expect(resolvePeerRelays).toHaveBeenCalledTimes(2);
 	});
 });
+
+
+describe("typed discovery advertisement", () => {
+	it("publishes handler skills supplied through advertise", async () => {
+		publishToRelays.mockImplementation(async (targets: string[]) =>
+			published({ targets }),
+		);
+		const skill = {
+			id: "invoice.review",
+			description: "Review an invoice",
+			inputSchema: {
+				type: "object",
+				required: ["amount"],
+				properties: { amount: { type: "number" } },
+			},
+		};
+
+		await (await transport()).advertise(["invoice.review"], {
+			skills: [skill],
+		});
+
+		const cardCall = publishToRelays.mock.calls.find(
+			(call: unknown[]) => (call[1] as { kind?: number }).kind === 11337,
+		);
+		expect(cardCall).toBeDefined();
+		const card = JSON.parse((cardCall?.[1] as { content: string }).content);
+		expect(card.version).toBe("1.1.0");
+		expect(card.skills).toEqual([skill]);
+	});
+});

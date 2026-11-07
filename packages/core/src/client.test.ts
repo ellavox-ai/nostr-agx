@@ -118,6 +118,164 @@ describe("AgxClient task request/response", () => {
 		expect(await pending).toBe(5);
 	});
 
+	it("preflights a typed peer skill before publishing", async () => {
+		const transport: AgxTransport = {
+			...bus.transport(ALICE),
+			resolvePeer: vi.fn(async () => ({
+				relays: [],
+				card: {
+					displayName: "Billing",
+					capabilities: ["invoice.review"],
+					nip05: null,
+					skills: [{
+						id: "invoice.review",
+						description: "Review an invoice",
+						inputSchema: {
+							type: "object",
+							required: ["amount"],
+							properties: { amount: { type: "number" } },
+						},
+					}],
+				},
+			})),
+		};
+		const publishMessage = vi.spyOn(transport, "publishMessage");
+		const alice = new AgxClient({ transport });
+
+		await expect(
+			alice.request(BOB, "invoice.review", { amount: "hello" }, { validate: true }),
+		).rejects.toThrow(/invalid_input.*expected number/);
+		expect(publishMessage).not.toHaveBeenCalled();
+	});
+
+	it("returns invalid_input for an authorized bad payload without invoking the handler", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const handler = vi.fn(() => ({ approved: true }));
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+		});
+		bob.handle("invoice.review", handler, {
+			description: "Review an invoice",
+			inputSchema: {
+				type: "object",
+				required: ["amount"],
+				properties: { amount: { type: "number" } },
+			},
+		});
+
+		const pending = alice.request(BOB, "invoice.review", { amount: "hello" });
+		await bob.pump();
+		await alice.pump();
+		await expect(pending).rejects.toThrow("invalid_input");
+		expect(handler).not.toHaveBeenCalled();
+	});
+
+	it("runs a typed handler and returns output that satisfies its contract", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+		});
+		bob.handle("invoice.review", () => ({ approved: true }), {
+			description: "Review an invoice",
+			inputSchema: {
+				type: "object",
+				required: ["amount"],
+				properties: { amount: { type: "number" } },
+			},
+			outputSchema: {
+				type: "object",
+				required: ["approved"],
+				properties: { approved: { type: "boolean" } },
+			},
+		});
+
+		const pending = alice.request(BOB, "invoice.review", { amount: 5 });
+		await bob.pump();
+		await alice.pump();
+		expect(await pending).toEqual({ approved: true });
+	});
+
+	it("returns invalid_output instead of completing with a bad handler result", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const handler = vi.fn(() => ({ approved: "yes" }));
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+		});
+		bob.handle("invoice.review", handler, {
+			description: "Review an invoice",
+			outputSchema: {
+				type: "object",
+				required: ["approved"],
+				properties: { approved: { type: "boolean" } },
+			},
+		});
+
+		const pending = alice.request(BOB, "invoice.review", {});
+		await bob.pump();
+		await alice.pump();
+		await expect(pending).rejects.toThrow("invalid_output");
+		expect(handler).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not expose schema validation to a denied requester", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const handler = vi.fn(() => "ok");
+		const onMessage = vi.fn();
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: () => false,
+			onMessage,
+		});
+		bob.handle("invoice.review", handler, {
+			description: "Review an invoice",
+			inputSchema: { type: "object", required: ["amount"] },
+		});
+
+		const pending = alice.request(BOB, "invoice.review", {}, { timeoutMs: 20 });
+		await bob.pump();
+		expect(handler).not.toHaveBeenCalled();
+		expect(onMessage).toHaveBeenCalledTimes(1);
+		expect(bus.inbox.get(ALICE) ?? []).toHaveLength(0);
+		await expect(pending).rejects.toThrow(/timed out/);
+	});
+
+	it("rejects an invalid handler schema at registration", () => {
+		const bob = new AgxClient({ transport: bus.transport(BOB) });
+		expect(() =>
+			bob.handle("invoice.review", () => null, {
+				description: "Review an invoice",
+				inputSchema: { $ref: "https://example.com/schema" },
+			}),
+		).toThrow(/unsupported schema keyword/);
+	});
+
+	it("advertises typed contracts without changing legacy capability keys", async () => {
+		const advertise = vi.fn(async () => ({ ok: true }));
+		const bob = new AgxClient({
+			transport: { ...bus.transport(BOB), advertise },
+		});
+		bob.handle("invoice.review", () => null, {
+			description: "Review an invoice",
+			inputSchema: { type: "object" },
+		});
+		bob.handle("invoice.pay", () => null);
+
+		await bob.start({ pollIntervalMs: 0 });
+		expect(advertise).toHaveBeenCalledWith(
+			["invoice.review", "invoice.pay"],
+			expect.objectContaining({
+				skills: [{
+					id: "invoice.review",
+					description: "Review an invoice",
+					inputSchema: { type: "object" },
+				}],
+			}),
+		);
+	});
+
 	it("does not auto-reply to a task whose capability has no handler; routes it to onMessage", async () => {
 		const alice = new AgxClient({ transport: bus.transport(ALICE) });
 		const onMessage = vi.fn();

@@ -15,6 +15,7 @@ export * from "./capability";
 export * from "./client";
 export * from "./errors";
 export * from "./id";
+export * from "./json-schema";
 export * from "./logger";
 export * from "./seen-store";
 export * from "./task";

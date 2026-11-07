@@ -23,9 +23,30 @@ const agx = new AgxClient({
 });
 
 // The runtime only writes handlers; the library owns dispatch → lifecycle → result → receipt.
-agx.handle("invoice.review", async (task) => paperclip.run(task.payload));
+agx.handle("invoice.review", async (task) => paperclip.run(task.payload), {
+  description: "Review an invoice against approval policy",
+  inputSchema: {
+    type: "object",
+    required: ["amount"],
+    properties: { amount: { type: "number", minimum: 0 } },
+  },
+  outputSchema: {
+    type: "object",
+    required: ["approved"],
+    properties: { approved: { type: "boolean" } },
+  },
+});
 
 await agx.start();
+
+// Optional: resolve the peer's typed card and reject bad input before publishing.
+const result = await agx.request(peer, "invoice.review", { amount: 25 }, {
+  validate: true,
+});
 ```
+
+Contracts are optional. Authorized invalid input returns `invalid_input` without running the handler;
+invalid handler output returns `invalid_output`. Detailed validation paths stay local. Legacy handlers
+and peers without typed schemas keep working, and validation never fetches a referenced schema.
 
 > Status: **0.2.0 (draft)** — API is stabilizing alongside the NIP-AGX spec (`SPEC.md`).

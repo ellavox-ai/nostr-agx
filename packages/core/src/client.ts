@@ -1,5 +1,9 @@
 import { AgxPublicError, AgxTaskDeclined } from "./errors";
 import { randomId } from "./id";
+import {
+	validateAgxJsonPayload,
+	validateAgxJsonSchema,
+} from "./json-schema";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
 import {
@@ -11,6 +15,7 @@ import {
 	type TaskResultEnvelope,
 } from "./task";
 import type {
+	AgxAgentSkill,
 	AgxIncomingMessage,
 	AgxIncomingReceipt,
 	AgxTransport,
@@ -35,6 +40,13 @@ import {
 export type TaskHandler<Payload = unknown, Output = unknown> = (
 	task: Task<Payload>,
 ) => Output | Promise<Output>;
+
+export type AgxTaskContract = Omit<AgxAgentSkill, "id">;
+
+interface RegisteredTaskHandler {
+	handler: TaskHandler;
+	contract?: AgxTaskContract;
+}
 
 /** Context for the trust/authorization hook, evaluated before a task runs. */
 export interface AgxAuthorizeContext {
@@ -147,7 +159,7 @@ export class AgxClient {
 	private readonly maxConcurrentTasks: number;
 	/** Handlers running outside `pump()` (`maxConcurrentTasks` above 1). */
 	private readonly runningTasks = new Set<Promise<void>>();
-	private readonly handlers = new Map<string, TaskHandler>();
+	private readonly handlers = new Map<string, RegisteredTaskHandler>();
 	private readonly pending = new Map<string, Pending>();
 	private cursor: number;
 	private pollTimer?: ReturnType<typeof setTimeout>;
@@ -205,13 +217,28 @@ export class AgxClient {
 		return new TextEncoder().encode(text).length <= MAX_BODY_BYTES;
 	}
 
-	/** Register a capability handler. The set of registered keys is what `start()`
-	 * advertises on the Agent Card (discovery + capability matching are automatic). */
+	/** Register a capability handler and, optionally, its public typed contract. */
 	handle<Payload = unknown, Output = unknown>(
 		capability: string,
 		handler: TaskHandler<Payload, Output>,
+		contract?: AgxTaskContract,
 	): this {
-		this.handlers.set(capability, handler as TaskHandler);
+		for (const keyword of ["inputSchema", "outputSchema"] as const) {
+			const schema = contract?.[keyword];
+			if (!schema) {
+				continue;
+			}
+			const problem = validateAgxJsonSchema(schema);
+			if (problem) {
+				throw new Error(
+					`AGX handler ${capability} ${keyword}: ${problem}`,
+				);
+			}
+		}
+		this.handlers.set(capability, {
+			handler: handler as TaskHandler,
+			contract,
+		});
 		return this;
 	}
 
@@ -220,14 +247,30 @@ export class AgxClient {
 		return [...this.handlers.keys()];
 	}
 
+	private typedSkills(): AgxAgentSkill[] {
+		return [...this.handlers].flatMap(([id, registered]) =>
+			registered.contract ? [{ ...registered.contract, id }] : [],
+		);
+	}
+
 	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
-	 * result, an unsupported capability, or timeout. */
+	 * result, an unsupported capability, timeout, or opted-in schema preflight. */
 	async request<Output = unknown>(
 		peer: string,
 		capability: string,
 		payload: unknown,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; validate?: boolean },
 	): Promise<Output> {
+		if (opts?.validate) {
+			const card = (await this.transport.resolvePeer(peer)).card;
+			const skill = card?.skills?.find((candidate) => candidate.id === capability);
+			if (skill?.inputSchema) {
+				const problem = validateAgxJsonPayload(skill.inputSchema, payload);
+				if (problem) {
+					throw new Error(`AGX request: invalid_input: ${problem}`);
+				}
+			}
+		}
 		const taskId = randomId();
 		const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
 		const envelope: TaskRequestEnvelope = {
@@ -572,11 +615,13 @@ export class AgxClient {
 	}): Promise<void> {
 		await this.transport.start?.();
 		if (opts?.advertise !== false && this.transport.advertise) {
+			const skills = this.typedSkills();
 			await this.transport
 				.advertise(this.capabilities(), {
 					org: this.identity?.org,
 					nip05: this.identity?.nip05,
 					payloadTypes: [DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE],
+					...(skills.length > 0 ? { skills } : {}),
 				})
 				.catch((e) =>
 					this.log.warn?.("AGX: advertise failed", {
@@ -694,11 +739,30 @@ export class AgxClient {
 			await this.onMessage?.(msg);
 			return;
 		}
-		const handler = this.handlers.get(env.capability);
-		if (!handler) {
+		const registered = this.handlers.get(env.capability);
+		if (!registered) {
 			// Unreachable — dispatchMessage only routes here when a handler exists.
 			// Guard defensively and, crucially, do NOT auto-reply.
 			return;
+		}
+		if (registered.contract?.inputSchema) {
+			const problem = validateAgxJsonPayload(
+				registered.contract.inputSchema,
+				env.payload,
+			);
+			if (problem) {
+				this.log.info?.("AGX: task input failed schema validation", {
+					taskId: env.taskId,
+					capability: env.capability,
+					from: msg.from,
+					error: problem,
+				});
+				await this.sendResult(msg.from, env.taskId, {
+					status: "failed",
+					error: "invalid_input",
+				});
+				return;
+			}
 		}
 		// Best-effort delivery receipt (the task was accepted for processing).
 		await this.transport
@@ -720,13 +784,13 @@ export class AgxClient {
 			sentAt: msg.sentAt,
 		};
 		if (this.maxConcurrentTasks === 1) {
-			await this.runTask(msg, env, handler, task);
+			await this.runTask(msg, env, registered, task);
 			return;
 		}
 		while (this.runningTasks.size >= this.maxConcurrentTasks) {
 			await Promise.race(this.runningTasks);
 		}
-		const running: Promise<void> = this.runTask(msg, env, handler, task)
+		const running: Promise<void> = this.runTask(msg, env, registered, task)
 			.catch((err) =>
 				this.log.error?.("AGX: task failed outside its handler", {
 					taskId: env.taskId,
@@ -748,11 +812,29 @@ export class AgxClient {
 	private async runTask(
 		msg: AgxIncomingMessage,
 		env: TaskRequestEnvelope,
-		handler: TaskHandler,
+		registered: RegisteredTaskHandler,
 		task: Task,
 	): Promise<void> {
 		try {
-			const output = await handler(task);
+			const output = await registered.handler(task);
+			if (registered.contract?.outputSchema) {
+				const problem = validateAgxJsonPayload(
+					registered.contract.outputSchema,
+					output,
+				);
+				if (problem) {
+					this.log.warn?.("AGX: task output failed schema validation", {
+						taskId: env.taskId,
+						capability: env.capability,
+						error: problem,
+					});
+					await this.sendResult(msg.from, env.taskId, {
+						status: "failed",
+						error: "invalid_output",
+					});
+					return;
+				}
+			}
 			await this.sendResult(msg.from, env.taskId, {
 				status: "completed",
 				output,

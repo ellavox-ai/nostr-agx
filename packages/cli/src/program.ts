@@ -654,6 +654,7 @@ export function buildProgram(): Command {
 		.description("read an agent's published Agent Card from the relays")
 		.option("--relay <url...>", "override the relays to query")
 		.option("--raw", "also print the raw signed event")
+		.option("--skill <id>", "print one typed skill and its input/output schemas")
 		.option(
 			"--verify",
 			"check the card's claimed NIP-05 against the domain itself",
