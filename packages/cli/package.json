@@ -45,6 +45,9 @@
 	},
 	"dependencies": {
 		"@orpc/client": "1.15.0",
+		"@nostr-relay/common": "^0.0.41",
+		"@nostr-relay/core": "^0.0.41",
+		"@nostr-relay/validator": "^0.0.41",
 		"commander": "^15.0.0",
 		"kleur": "^4.1.5",
 		"nostr-tools": "^2.25.0",

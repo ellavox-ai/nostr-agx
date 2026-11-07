@@ -60,27 +60,36 @@ async function main() {
 
 	// A real runtime would `await responder.start()` (advertise + poll on an
 	// interval). Here we drive `pump()` manually so the example exits cleanly.
-	const pending = initiator.request<{ approved: boolean }>(
+	// const pending = initiator.request<{ approved: boolean }>(
+	// 	responder.whoami(),
+	// 	"invoice.review",
+	// 	{ amount: 4200, vendor: "Globex" },
+	// );
+
+	// const result = await pending;
+	// console.info("invoice.review →", result); // { approved: true }
+
+	const stream = await initiator.streamRequest<{ approved: boolean }>(
 		responder.whoami(),
 		"invoice.review",
 		{ amount: 4200, vendor: "Globex" },
 	);
 
-	// Pump both sides until the result lands. Publishing is not instant — each
-	// gift wrap is mined to a NIP-13 difficulty and routed via NIP-65 — so a
-	// single fixed sleep can race it.
-	let settled = false;
-	pending.finally(() => {
-		settled = true;
-	});
-	for (let i = 0; i < 40 && !settled; i++) {
-		await sleep(250);
-		await responder.pump(); // receive request → run handler → reply
-		await initiator.pump(); // receive the correlated result
-	}
+	await new Promise((resolve, reject) => {
+		stream.on("error", (err) => {
+			console.error("invoice.review error →", err);
+			reject(err);
+		});
 
-	const result = await pending;
-	console.info("invoice.review →", result); // { approved: true }
+		stream.on("statusUpdate", status => {
+			console.log("invoice.review status →", status);
+		})
+
+		stream.on("completed", (output: { approved: boolean }) => {
+			console.log("invoice.review →", output);
+			resolve(undefined);
+		})
+	})
 }
 
 main().then(

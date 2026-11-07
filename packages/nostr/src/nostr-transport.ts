@@ -1,4 +1,6 @@
 import {
+	type AgxIncomingMessage,
+	type AgxIncomingReceipt,
 	type AgxLogger,
 	type AgxPollResult,
 	type AgxResolvedPeer,
@@ -41,6 +43,7 @@ import {
 	unwrapRumor,
 } from "./giftwrap";
 import {
+	listenEvents,
 	pollInbox,
 	publishToRelays,
 	type RelayFailureKind,
@@ -51,6 +54,7 @@ import {
 	isSignerUnavailable,
 } from "./signer";
 import { configureWebSocket, type WebSocketImpl } from "./ws";
+import type { Subscription } from "nostr-tools/relay";
 
 export interface NostrTransportConfig {
 	/** Signs, encrypts and decrypts for this agent. Use `localSigner(secretKey)`
@@ -124,11 +128,18 @@ export class NostrTransport implements AgxTransport {
 		CacheEntry<AgxResolvedPeer["card"]>
 	>();
 
+	private readonly ws?: WebSocketImpl | undefined;
+	private onMessageHandlers = new Set<(msg: AgxIncomingMessage) => void | Promise<void>>();
+	private onReceiptHandlers = new Set<(receipt: AgxIncomingReceipt) => void | Promise<void>>();
+	private subscriptions: Subscription[] = [];
+
 	/** Resolves the signer's public key once, up front, so `whoami()` stays
 	 * synchronous (the `AgxTransport` contract) even for a remote signer. */
 	static async create(config: NostrTransportConfig): Promise<NostrTransport> {
 		const publicKey = await config.signer.getPublicKey();
-		return new NostrTransport(config, publicKey);
+		const transport = new NostrTransport(config, publicKey);
+		await transport.start()
+		return transport;
 	}
 
 	private constructor(config: NostrTransportConfig, publicKey: string) {
@@ -786,5 +797,36 @@ export class NostrTransport implements AgxTransport {
 			this.signer,
 		);
 		return { ok: a.ok && b.ok };
+	}
+
+	async start(): Promise<void> {
+		await this.listenMessages()
+	}
+
+	private async listenMessages(): Promise<void> {
+		this.subscriptions = await listenEvents(this.signer, this.relays, {
+			pubkey: this.publicKey,
+		}, (data: AgxIncomingMessage | AgxIncomingReceipt) => {
+			if ('receipt' in data) {
+				this.onReceiptHandlers.forEach(handler => handler(data));
+			} else {
+				this.onMessageHandlers.forEach(handler => handler(data));
+			}
+		});
+	}
+
+	async stop(): Promise<void> {
+		this.subscriptions.forEach((sub) => sub.close());
+		this.subscriptions = [];
+		this.onMessageHandlers.clear();
+		this.onReceiptHandlers.clear();
+	}
+
+	onMessage(handler: (msg: AgxIncomingMessage) => void | Promise<void>): void {
+		this.onMessageHandlers.add(handler);
+	}
+
+	onReceipt(handler: (receipt: AgxIncomingReceipt) => void | Promise<void>): void {
+		this.onReceiptHandlers.add(handler);
 	}
 }

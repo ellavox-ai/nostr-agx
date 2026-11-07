@@ -1,8 +1,10 @@
-import { type AgxLogger, noopLogger } from "@nostr-agx/core";
+import { type AgxIncomingMessage, type AgxIncomingReceipt, type AgxLogger, noopLogger } from "@nostr-agx/core";
 import { type Event, type Filter, getEventHash, verifyEvent } from "nostr-tools";
-import { Relay } from "nostr-tools/relay";
+import { Relay, Subscription } from "nostr-tools/relay";
 import { GIFT_WRAP_KIND } from "./kinds";
-import type { AgxSigner } from "./signer";
+import { isSignerUnavailable, type AgxSigner } from "./signer";
+import { isIgnorableReceiptRumor, openMessageRumor, openReceiptRumor } from "./events";
+import { unwrapRumor, type UnwrappedRumor } from "./giftwrap";
 
 /**
  * Ids whose signature has already checked out in this process, oldest first.
@@ -781,4 +783,127 @@ export async function pollInbox(params: {
 		),
 		complete,
 	};
+}
+
+/**
+ * Subscribe to relays for MESSAGE/RECEIPT events tagged to `pubkey`. 
+ * Each relay is subscribed to once, and the callback is called for each event received. 
+ * The subscription is not automatically closed; the caller must manage the lifecycle of the subscriptions.
+ */
+export async function listenEvents(signer: AgxSigner, relays: string[], params: { pubkey: string }, callback: (data: AgxIncomingMessage | AgxIncomingReceipt) => void) {
+	if (relays.length === 0) {
+		return []
+	}
+
+	const results = await Promise.allSettled(
+		relays.map(async (url) => {
+			// Bound the connect too: a relay can accept the TCP socket then stall the WS
+			// upgrade, which would otherwise hang here past any per-op budget.
+			const relay = await withTimeout(
+				Relay.connect(url),
+				RELAY_OP_TIMEOUT_MS,
+				// No URL in the label. A connect timeout surfaces as
+				// `rejected[].error` too, and every caller already renders the relay
+				// alongside it — pollInbox logs `{ relay: url }`, publishToRelays keeps
+				// it in its own field. Naming it here made the message say it twice.
+				"relay connect",
+			);
+			if (signer) {
+				// Verified before it is sent: a remote signer's answer is not trusted
+				// blindly, and verifyEvent is also what brands it a VerifiedEvent.
+				relay.onauth = async (evt) => {
+					const signed = await signer.signEvent(evt);
+					if (!verifyEvent(signed)) {
+						throw new Error("signer returned an invalid AUTH event");
+					}
+					return signed;
+				};
+			}
+
+			let sub: Subscription | null = null;
+
+			const filter: Filter = {
+				kinds: [GIFT_WRAP_KIND],
+				"#p": [params.pubkey]
+			};
+
+			sub = relay.subscribe([filter], {
+				async onevent(event: Event) {
+					// console.log(`Event received from relay ${url}:`, event);
+					let unwrapped: UnwrappedRumor | null = null;
+					try {
+						unwrapped = await unwrapRumor({ signer, event });
+					} catch (err) {
+						if (!isSignerUnavailable(err)) {
+							throw err;
+						}
+						// The signer is down, not the wraps bad: stop opening, discard
+						// none of the rest, and report the poll incomplete so the host holds
+						// its cursor and the next poll sees them again. What was opened
+						// before this point is still returned — safe, the cursor holds.
+					}
+					if (!unwrapped) {
+						return
+					}
+
+					// A receipt with a status a newer peer added: ignored, by the spec,
+					// rather than counted and warned about as malformed. Recorded as seen
+					// so it is not reopened on the next poll.
+					if (isIgnorableReceiptRumor(unwrapped)) {
+						return;
+					}
+					const receipt = openReceiptRumor(unwrapped);
+					if (receipt) {
+						callback({
+							from: receipt.senderPubkey,
+							eventId: receipt.eventId,
+							transportId: event.id,
+							createdAt: receipt.createdAt,
+							sentAt: receipt.sentAt,
+							receipt: receipt.receipt,
+						});
+						return;
+					}
+					const opened = openMessageRumor(unwrapped);
+					if (opened) {
+						callback({
+							from: opened.senderPubkey,
+							eventId: opened.eventId,
+							transportId: event.id,
+							createdAt: opened.createdAt,
+							sentAt: opened.sentAt,
+							text: opened.text,
+							contextId: opened.contextId,
+							messageId: opened.messageId,
+							subject: opened.subject,
+							// Forwarded, not derived. What the peer declared is what the host's
+							// loop guard reasons about; deciding here would hide the signal.
+							autoDepth: opened.autoDepth,
+							contentType: opened.contentType,
+							// Forwarded as the sender declared it; trusting it is the host's call.
+							...(opened.evidence ? { evidence: opened.evidence } : {}),
+						});
+					}
+				}
+			})
+
+			return sub
+		})
+	)
+
+	// Index-preserving, like pollInbox's per-relay logging below: a bare
+	// `.filter(rejected).map(reason)` decouples each error from the relay that
+	// produced it, and "which relay refused" is the whole question when some
+	// accept and others do not.
+	const subscriptions: Subscription[] = [];
+	for (let i = 0; i < results.length; i++) {
+		const r = results[i];
+		if (r.status === "fulfilled") {
+			subscriptions.push(r.value);
+		} else {
+			console.error(`Failed to subscribe to relay ${relays[i] ?? "unknown"}:`, r.reason);
+		}
+	}
+
+	return subscriptions
 }

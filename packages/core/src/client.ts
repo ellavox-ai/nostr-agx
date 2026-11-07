@@ -154,6 +154,9 @@ export class AgxClient {
 	/** True while a pump() is in flight — prevents overlapping pumps from
 	 * double-running a handler (the seen-add happens only after dispatch). */
 	private pumping = false;
+	/** Shared by live subscriptions and poll() so they cannot dispatch one event
+	 * twice while either path is still processing it. */
+	private readonly activeDispatches = new Map<string, Promise<boolean>>();
 	/** True while the self-rescheduling poll loop should keep running. */
 	private running = false;
 
@@ -175,6 +178,7 @@ export class AgxClient {
 		this.maxConcurrentTasks =
 			Number.isFinite(concurrent) && concurrent > 1 ? concurrent : 1;
 		this.cursor = opts.startCursor ?? 0;
+		this.startMessageListener()
 	}
 
 	/** This agent's identity (from the transport). */
@@ -228,6 +232,38 @@ export class AgxClient {
 		payload: unknown,
 		opts?: { timeoutMs?: number },
 	): Promise<Output> {
+		const { result } = await this.sendRequest<Output>(
+			peer,
+			capability,
+			payload,
+			opts,
+		);
+		return result;
+	}
+
+	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
+	 * result, an unsupported capability, or timeout. */
+	async streamRequest<Output = unknown>(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		opts?: { timeoutMs?: number },
+	): Promise<StreamResponse<Output>> {
+		const { taskId } = await this.sendRequest<Output>(
+			peer,
+			capability,
+			payload,
+			opts,
+		);
+		return new StreamResponse<Output>(this.transport, taskId);
+	}
+
+	private async sendRequest<Output = unknown>(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		opts?: { timeoutMs?: number },
+	): Promise<{ taskId: string; result: Promise<Output> }> {
 		const taskId = randomId();
 		const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
 		const envelope: TaskRequestEnvelope = {
@@ -252,13 +288,13 @@ export class AgxClient {
 			const timer =
 				timeoutMs > 0
 					? setTimeout(() => {
-							this.pending.delete(taskId);
-							reject(
-								new Error(
-									`AGX request timed out after ${timeoutMs}ms`,
-								),
-							);
-						}, timeoutMs)
+						this.pending.delete(taskId);
+						reject(
+							new Error(
+								`AGX request timed out after ${timeoutMs}ms`,
+							),
+						);
+					}, timeoutMs)
 					: undefined;
 			this.pending.set(taskId, {
 				resolve: resolve as (o: unknown) => void,
@@ -286,7 +322,8 @@ export class AgxClient {
 				new Error(`AGX request: publish failed to ${peer}`),
 			);
 		}
-		return result;
+
+		return { taskId, result };
 	}
 
 	/** One poll → dispatch cycle. Drains inbound messages, dispatches task requests
@@ -348,6 +385,55 @@ export class AgxClient {
 		return false;
 	}
 
+	private async markSeen(event: {
+		eventId: string;
+		transportId?: string;
+	}): Promise<void> {
+		const ids =
+			event.transportId && event.transportId !== event.eventId
+				? [event.eventId, event.transportId]
+				: [event.eventId];
+		if (this.seen.addMany) {
+			await this.seen.addMany(ids);
+			return;
+		}
+		for (const id of ids) {
+			await this.seen.add(id);
+		}
+	}
+
+	/** Dispatch an event through whichever receive path got it first. */
+	private async dispatchOnce(
+		event: { eventId: string; transportId?: string },
+		dispatch: () => void | Promise<void>,
+	): Promise<boolean> {
+		const active = this.activeDispatches.get(event.eventId);
+		if (active) {
+			await active;
+			return false;
+		}
+
+		const operation = (async () => {
+			if (await this.seen.has(event.eventId)) {
+				if (event.transportId && event.transportId !== event.eventId) {
+					await this.seen.add(event.transportId);
+				}
+				return false;
+			}
+			await dispatch();
+			await this.markSeen(event);
+			return true;
+		})();
+		this.activeDispatches.set(event.eventId, operation);
+		try {
+			return await operation;
+		} finally {
+			if (this.activeDispatches.get(event.eventId) === operation) {
+				this.activeDispatches.delete(event.eventId);
+			}
+		}
+	}
+
 	private async pumpOnce(): Promise<{
 		cursor: number;
 		dispatched: number;
@@ -403,18 +489,6 @@ export class AgxClient {
 		// to us, and one round-trip each would let that flood stall the pump
 		// before any real message is dispatched.
 		await addAll(res.discarded ?? []);
-		// An event's envelope id, when the binding has one distinct from its
-		// event id; recorded alongside it so the next poll skips the envelope.
-		const markSeen = async (event: {
-			eventId: string;
-			transportId?: string;
-		}): Promise<void> => {
-			await addAll(
-				event.transportId && event.transportId !== event.eventId
-					? [event.eventId, event.transportId]
-					: [event.eventId],
-			);
-		};
 		// Prefetch the whole batch's seen-set in one round-trip when the store
 		// supports it — a busy team can carry hundreds of events per poll, and a
 		// serial `has()` per event would be that many sequential DB round-trips.
@@ -471,14 +545,17 @@ export class AgxClient {
 				continue;
 			}
 			let ignored = false;
+			let processed: boolean;
 			try {
 				// Inside the try: a host filter that throws is a failed dispatch
 				// (retried, then dead-lettered), not a pump that rejects at the same
 				// event on every poll.
-				ignored = this.ignore?.(msg) === true;
-				if (!ignored) {
-					await this.dispatchMessage(msg);
-				}
+				processed = await this.dispatchOnce(msg, async () => {
+					ignored = this.ignore?.(msg) === true;
+					if (!ignored) {
+						await this.dispatchMessage(msg);
+					}
+				});
 			} catch (err) {
 				// A transient host error (e.g. a throwing onMessage) must not lose the
 				// message or block the rest of the batch: leave it UNSEEN, hold the
@@ -493,7 +570,7 @@ export class AgxClient {
 				);
 				if (deadLettered) {
 					// Its envelope too, or the next poll re-opens it just to skip it.
-					await markSeen(msg);
+					await this.markSeen(msg);
 					attempted.set(msg.eventId, "done");
 				} else {
 					attempted.set(msg.eventId, "pending");
@@ -501,10 +578,8 @@ export class AgxClient {
 				}
 				continue;
 			}
-			// Record as processed only AFTER a successful dispatch.
-			await markSeen(msg);
 			attempted.set(msg.eventId, "done");
-			if (!ignored) {
+			if (processed && !ignored) {
 				dispatched += 1;
 			}
 		}
@@ -519,9 +594,11 @@ export class AgxClient {
 				continue;
 			}
 			try {
-				if (this.ignore?.(receipt) !== true) {
-					await this.onReceipt?.(receipt);
-				}
+				await this.dispatchOnce(receipt, async () => {
+					if (this.ignore?.(receipt) !== true) {
+						await this.onReceipt?.(receipt);
+					}
+				});
 			} catch (err) {
 				const deadLettered = await this.onDispatchFailure(
 					"receipt",
@@ -531,7 +608,7 @@ export class AgxClient {
 				);
 				if (deadLettered) {
 					// Its envelope too, or the next poll re-opens it just to skip it.
-					await markSeen(receipt);
+					await this.markSeen(receipt);
 					attempted.set(receipt.eventId, "done");
 				} else {
 					attempted.set(receipt.eventId, "pending");
@@ -539,7 +616,6 @@ export class AgxClient {
 				}
 				continue;
 			}
-			await markSeen(receipt);
 			attempted.set(receipt.eventId, "done");
 		}
 		// Advance the cursor only when the poll was complete AND nothing failed —
@@ -649,6 +725,33 @@ export class AgxClient {
 			// fall through: not a task we service → treat as a plain message.
 		}
 		await this.onMessage?.(msg);
+	}
+
+	private async dispatchLiveEvent(
+		kind: "message" | "receipt",
+		event: AgxIncomingMessage | AgxIncomingReceipt,
+	): Promise<void> {
+		if (event.createdAt > Math.floor(Date.now() / 1000) + MAX_FUTURE_SKEW_SEC) {
+			return;
+		}
+		try {
+			await this.dispatchOnce(event, async () => {
+				if (this.ignore?.(event) === true) {
+					return;
+				}
+				if ("receipt" in event) {
+					await this.onReceipt?.(event);
+				} else {
+					await this.dispatchMessage(event);
+				}
+			});
+		} catch (err) {
+			this.log.error?.(`AGX: live ${kind} dispatch failed; poll will retry`, {
+				eventId: event.eventId,
+				from: event.from,
+				error: String(err),
+			});
+		}
 	}
 
 	private async handleTaskRequest(
@@ -877,5 +980,73 @@ export class AgxClient {
 			clearTimeout(p.timer);
 		}
 		p.reject(error);
+	}
+
+	private async startMessageListener(): Promise<void> {
+		await this.transport.onMessage?.(async (msg: AgxIncomingMessage) => {
+			await this.dispatchLiveEvent("message", msg);
+		});
+
+		await this.transport.onReceipt?.(async (receipt: AgxIncomingReceipt) => {
+			await this.dispatchLiveEvent("receipt", receipt);
+		})
+	}
+}
+
+type StreamEvents<Output> = {
+	completed: (output: Output) => void;
+	statusUpdate: (status: "completed" | "delivered" | "failed") => void;
+	error: (error: string) => void;
+};
+
+
+/**
+ * A StreamResponse represents a streaming response from a task request. 
+ * It allows the caller to register event listeners for status updates, completion, and errors.
+ * Similar how the SendStreamingMessage is expected to work according to the A2A specification
+ */
+class StreamResponse<Output> {
+	private events = new Map<keyof StreamEvents<Output>, Array<StreamEvents<Output>[keyof StreamEvents<Output>]>>();
+
+	constructor(transport: AgxTransport, taskId: string) {
+		transport.onReceipt?.(async (receipt: AgxIncomingReceipt) => {
+			if (receipt.receipt.contextId === taskId) {
+				this.emit('statusUpdate', 'delivered');
+			}
+		});
+
+		transport.onMessage?.(async (msg: AgxIncomingMessage) => {
+			if (msg.contextId === taskId) {
+				const env = parseTaskEnvelope(msg.text)
+				if (env?.t === "res") {
+					if (env.status == 'failed') {
+						this.emit('statusUpdate', 'failed');
+						this.emit('error', env.error);
+						return
+					}
+					if (env.status == 'completed') {
+						this.emit('statusUpdate', 'completed');
+						this.emit('completed', env.output);
+						return
+					}
+				} else {
+					this.emit('error', 'TaskNotFoundError');
+				}
+			}
+		});
+	}
+
+	on(event: keyof StreamEvents<Output>, listener: (data: any) => void): StreamResponse<Output> {
+		const listeners = this.events.get(event) || [];
+		listeners.push(listener);
+		this.events.set(event, listeners);
+		return this;
+	}
+
+	private emit(event: keyof StreamEvents<Output>, data: any): void {
+		const listeners = this.events.get(event);
+		if (listeners) {
+			listeners.forEach((listener) => listener(data));
+		}
 	}
 }

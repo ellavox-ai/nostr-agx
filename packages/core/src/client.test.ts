@@ -92,6 +92,33 @@ class MemoryBus {
 	}
 }
 
+function liveTransport(id: string) {
+	const base = bus.transport(id);
+	const messageHandlers: Array<
+		(msg: AgxIncomingMessage) => void | Promise<void>
+	> = [];
+	const receiptHandlers: Array<
+		(receipt: AgxIncomingReceipt) => void | Promise<void>
+	> = [];
+	return {
+		transport: {
+			...base,
+			onMessage(handler) {
+				messageHandlers.push(handler);
+			},
+			onReceipt(handler) {
+				receiptHandlers.push(handler);
+			},
+		} satisfies AgxTransport,
+		async deliverMessage(msg: AgxIncomingMessage) {
+			await Promise.all(messageHandlers.map((handler) => handler(msg)));
+		},
+		async deliverReceipt(receipt: AgxIncomingReceipt) {
+			await Promise.all(receiptHandlers.map((handler) => handler(receipt)));
+		},
+	};
+}
+
 let bus: MemoryBus;
 const ALICE = "alice";
 const BOB = "bob";
@@ -501,6 +528,184 @@ describe("AgxClient task request/response", () => {
 
 		await bob.pump(); // same receipt redelivered in the overlap window
 		expect(onReceipt).toHaveBeenCalledTimes(1); // deduped via the SeenStore
+	});
+
+	it("dedupes a live subscription event against a concurrent poll", async () => {
+		const base = bus.transport(BOB);
+		let receiveLive: ((msg: AgxIncomingMessage) => void | Promise<void>) | undefined;
+		const transport: AgxTransport = {
+			...base,
+			onMessage(handler) {
+				receiveLive = handler;
+			},
+		};
+		let finishDispatch: () => void = () => undefined;
+		let startedDispatch: () => void = () => undefined;
+		const dispatchStarted = new Promise<void>((resolve) => {
+			startedDispatch = resolve;
+		});
+		const dispatchGate = new Promise<void>((resolve) => {
+			finishDispatch = resolve;
+		});
+		const onMessage = vi.fn(async () => {
+			startedDispatch();
+			await dispatchGate;
+		});
+		const bob = new AgxClient({ transport, onMessage });
+		bus.pushMessage(BOB, {
+			from: ALICE,
+			text: "live and polled",
+			contextId: "ctx",
+			messageId: "same-event",
+			subject: null,
+			autoDepth: null,
+			contentType: "application/a2a+json",
+		});
+		const [msg] = bus.inbox.get(BOB)!;
+
+		const live = receiveLive!(msg);
+		await dispatchStarted;
+		const polling = bob.pump();
+		finishDispatch();
+		await Promise.all([live, polling]);
+
+		expect(onMessage).toHaveBeenCalledTimes(1);
+		expect(await bob.pump()).toMatchObject({ dispatched: 0 });
+	});
+});
+
+describe("AgxClient streamRequest", () => {
+	function gate() {
+		let open: () => void = () => undefined;
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		return { opened, open };
+	}
+
+	it("reports delivery and completion while an asynchronous handler is processing", async () => {
+		const aliceLive = liveTransport(ALICE);
+		const alice = new AgxClient({ transport: aliceLive.transport });
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+			maxConcurrentTasks: 2,
+		});
+		const processing = gate();
+		bob.handle("slow", async () => {
+			await processing.opened;
+			return "finished";
+		});
+
+		const stream = await alice.streamRequest<string>(BOB, "slow", {});
+		const statuses: string[] = [];
+		const completed = vi.fn();
+		stream.on("statusUpdate", (status) => statuses.push(status));
+		stream.on("completed", completed);
+
+		const request = bus.inbox.get(BOB)?.[0];
+		expect(request).toBeDefined();
+		const requestEnvelope = parseTaskEnvelope(request!.text);
+		expect(requestEnvelope?.t).toBe("req");
+		if (!requestEnvelope || requestEnvelope.t !== "req") {
+			throw new Error("Expected the stream request envelope");
+		}
+
+		await bob.pump();
+		expect(completed).not.toHaveBeenCalled();
+		await aliceLive.deliverReceipt({
+			from: BOB,
+			eventId: "receipt-1",
+			createdAt: 1,
+			receipt: {
+				v: 1,
+				kind: "receipt",
+				refEventId: request!.eventId,
+				contextId: requestEnvelope.taskId,
+				status: "delivered",
+			},
+		});
+		expect(statuses).toEqual(["delivered"]);
+
+		processing.open();
+		await bob.tasksSettled();
+		const result = bus.inbox.get(ALICE)?.[0];
+		expect(result).toBeDefined();
+		await alice.pump(); // Also settles streamRequest's correlated pending entry.
+		await aliceLive.deliverMessage(result!);
+
+		expect(statuses).toEqual(["delivered", "completed"]);
+		expect(completed).toHaveBeenCalledWith("finished");
+		await alice.stop();
+	});
+
+	it("reports failed task status and the peer's error", async () => {
+		const aliceLive = liveTransport(ALICE);
+		const alice = new AgxClient({ transport: aliceLive.transport });
+		const stream = await alice.streamRequest(BOB, "fails", {}, {
+			timeoutMs: 0,
+		});
+		const statuses: string[] = [];
+		const errors: string[] = [];
+		stream.on("statusUpdate", (status) => statuses.push(status));
+		stream.on("error", (error) => errors.push(error));
+
+		const request = bus.inbox.get(BOB)?.[0];
+		const envelope = request && parseTaskEnvelope(request.text);
+		if (!envelope || envelope.t !== "req") {
+			throw new Error("Expected the stream request envelope");
+		}
+		bus.pushMessage(ALICE, {
+			from: BOB,
+			text: encodeTaskEnvelope({
+				t: "res",
+				taskId: envelope.taskId,
+				status: "failed",
+				error: "handler failed",
+			}),
+			contextId: envelope.taskId,
+			messageId: "result-1",
+			subject: null,
+			autoDepth: null,
+			contentType: TASK_CONTENT_TYPE,
+		});
+		const result = bus.inbox.get(ALICE)![0];
+		await aliceLive.deliverMessage(result);
+		await alice.pump();
+
+		expect(statuses).toEqual(["failed"]);
+		expect(errors).toEqual(["handler failed"]);
+		await alice.stop();
+	});
+
+	it("emits TaskNotFoundError for a message that is not a task result", async () => {
+		const aliceLive = liveTransport(ALICE);
+		const alice = new AgxClient({ transport: aliceLive.transport });
+		const stream = await alice.streamRequest(BOB, "unknown", {}, {
+			timeoutMs: 0,
+		});
+		const errors: string[] = [];
+		stream.on("error", (error) => errors.push(error));
+
+		const request = bus.inbox.get(BOB)?.[0];
+		const envelope = request && parseTaskEnvelope(request.text);
+		if (!envelope || envelope.t !== "req") {
+			throw new Error("Expected the stream request envelope");
+		}
+		await aliceLive.deliverMessage({
+			from: BOB,
+			text: "not a task result",
+			contextId: envelope.taskId,
+			messageId: "invalid-result",
+			eventId: "invalid-result",
+			createdAt: 1,
+			subject: null,
+			autoDepth: null,
+			contentType: TASK_CONTENT_TYPE,
+		});
+
+		expect(errors).toEqual(["TaskNotFoundError"]);
+		await alice.stop();
 	});
 });
 
