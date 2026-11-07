@@ -1,16 +1,34 @@
 import { AgxPublicError, AgxTaskDeclined } from "./errors";
 import { randomId } from "./id";
+import {
+	validateAgxJsonPayload,
+	validateAgxJsonSchema,
+} from "./json-schema";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
+import {
+	AgxResumeCompletion,
+	type AgxResumeHandler,
+	AgxSuspensionManager,
+} from "./suspension";
+import {
+	type AgxSuspensionStore,
+	InMemorySuspensionStore,
+} from "./suspension-store";
 import {
 	encodeTaskEnvelope,
 	parseTaskEnvelope,
 	type Task,
 	type TaskEnvelope,
+	type TaskInputRequiredEnvelope,
 	type TaskRequestEnvelope,
 	type TaskResultEnvelope,
+	type TaskResumeEnvelope,
+	type TaskStatusEnvelope,
+	type TaskStatusUpdate,
 } from "./task";
 import type {
+	AgxAgentSkill,
 	AgxIncomingMessage,
 	AgxIncomingReceipt,
 	AgxTransport,
@@ -35,6 +53,14 @@ import {
 export type TaskHandler<Payload = unknown, Output = unknown> = (
 	task: Task<Payload>,
 ) => Output | Promise<Output>;
+
+export type AgxTaskContract = Omit<AgxAgentSkill, "id">;
+
+interface RegisteredTaskHandler {
+	handler: TaskHandler;
+	contract?: AgxTaskContract;
+	resume?: AgxResumeHandler;
+}
 
 /** Context for the trust/authorization hook, evaluated before a task runs. */
 export interface AgxAuthorizeContext {
@@ -90,6 +116,9 @@ export interface AgxClientOptions {
 	 * (unbounded at-least-once retries). Prevents a poison event from stalling the
 	 * inbox and letting a held cursor outrun the SeenStore retention window. */
 	maxDispatchAttempts?: number;
+	/** Durable input-required records. Default in-memory. Inject a persistent store
+	 * to resume suspended tasks after process restart. */
+	suspensions?: AgxSuspensionStore;
 	/** Task handlers that may run at once. With the default, 1, a handler runs
 	 * inside `pump()`, which waits for it, and its request is recorded as handled
 	 * once it has answered. Above 1, `pump()` starts each task in a free slot and
@@ -108,6 +137,10 @@ interface Pending {
 	 * if its sender matches — correlation by `taskId` alone is forgeable, since the
 	 * responder legitimately knows the `taskId`. */
 	peer: string;
+	onTaskStatus?: (update: TaskStatusUpdate) => void | Promise<void>;
+	lastStatusSeq: number;
+	inputRequired?: TaskInputRequiredEnvelope;
+	resumeInFlight: boolean;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -147,7 +180,8 @@ export class AgxClient {
 	private readonly maxConcurrentTasks: number;
 	/** Handlers running outside `pump()` (`maxConcurrentTasks` above 1). */
 	private readonly runningTasks = new Set<Promise<void>>();
-	private readonly handlers = new Map<string, TaskHandler>();
+	private readonly handlers = new Map<string, RegisteredTaskHandler>();
+	private readonly suspensions: AgxSuspensionManager;
 	private readonly pending = new Map<string, Pending>();
 	private cursor: number;
 	private pollTimer?: ReturnType<typeof setTimeout>;
@@ -175,6 +209,33 @@ export class AgxClient {
 		this.maxConcurrentTasks =
 			Number.isFinite(concurrent) && concurrent > 1 ? concurrent : 1;
 		this.cursor = opts.startCursor ?? 0;
+		this.suspensions = new AgxSuspensionManager({
+			store: opts.suspensions ?? new InMemorySuspensionStore(),
+			transport: this.transport,
+			logger: this.log,
+			normalizeId: (id) => this.normalizeId(id),
+			resumeHandler: (capability) => this.handlers.get(capability)?.resume,
+			validateResult: (capability, taskId, result) => {
+				const outputSchema = this.handlers.get(capability)?.contract?.outputSchema;
+				if (result.status !== "completed" || !outputSchema) {
+					return result;
+				}
+				const problem = validateAgxJsonPayload(outputSchema, result.output);
+				if (!problem) {
+					return result;
+				}
+				this.log.warn?.("AGX: resumed task output failed schema validation", {
+					taskId,
+					capability,
+					error: problem,
+				});
+				return { status: "failed", error: "invalid_output" };
+			},
+			attachTask: (task, seq) => this.attachTaskControl(task, seq),
+			sendStatus: (to, envelope) => this.sendTaskStatus(to, envelope),
+			sendResult: (to, taskId, result) =>
+				this.sendResult(to, taskId, result),
+		});
 	}
 
 	/** This agent's identity (from the transport). */
@@ -205,13 +266,30 @@ export class AgxClient {
 		return new TextEncoder().encode(text).length <= MAX_BODY_BYTES;
 	}
 
-	/** Register a capability handler. The set of registered keys is what `start()`
-	 * advertises on the Agent Card (discovery + capability matching are automatic). */
+	/** Register a capability handler and, optionally, its public typed contract. */
 	handle<Payload = unknown, Output = unknown>(
 		capability: string,
 		handler: TaskHandler<Payload, Output>,
+		contract?: AgxTaskContract,
+		resume?: AgxResumeHandler,
 	): this {
-		this.handlers.set(capability, handler as TaskHandler);
+		for (const keyword of ["inputSchema", "outputSchema"] as const) {
+			const schema = contract?.[keyword];
+			if (!schema) {
+				continue;
+			}
+			const problem = validateAgxJsonSchema(schema);
+			if (problem) {
+				throw new Error(
+					`AGX handler ${capability} ${keyword}: ${problem}`,
+				);
+			}
+		}
+		this.handlers.set(capability, {
+			handler: handler as TaskHandler,
+			contract,
+			resume,
+		});
 		return this;
 	}
 
@@ -220,14 +298,45 @@ export class AgxClient {
 		return [...this.handlers.keys()];
 	}
 
+	private typedSkills(): AgxAgentSkill[] {
+		return [...this.handlers].flatMap(([id, registered]) => {
+			if (!registered.contract) {
+				return [];
+			}
+			const protocolFeatures = registered.resume
+				? ["working", "input-required"]
+				: ["working"];
+			const declaredFeatures = registered.contract.features ?? [];
+			const features = new Set([
+				...declaredFeatures.slice(0, 16 - protocolFeatures.length),
+				...protocolFeatures,
+			]);
+			return [{ ...registered.contract, features: [...features], id }];
+		});
+	}
+
 	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
-	 * result, an unsupported capability, or timeout. */
+	 * result, an unsupported capability, timeout, or opted-in schema preflight. */
 	async request<Output = unknown>(
 		peer: string,
 		capability: string,
 		payload: unknown,
-		opts?: { timeoutMs?: number },
+		opts?: {
+			timeoutMs?: number;
+			validate?: boolean;
+			onTaskStatus?: (update: TaskStatusUpdate) => void | Promise<void>;
+		},
 	): Promise<Output> {
+		if (opts?.validate) {
+			const card = (await this.transport.resolvePeer(peer)).card;
+			const skill = card?.skills?.find((candidate) => candidate.id === capability);
+			if (skill?.inputSchema) {
+				const problem = validateAgxJsonPayload(skill.inputSchema, payload);
+				if (problem) {
+					throw new Error(`AGX request: invalid_input: ${problem}`);
+				}
+			}
+		}
 		const taskId = randomId();
 		const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
 		const envelope: TaskRequestEnvelope = {
@@ -265,6 +374,9 @@ export class AgxClient {
 				reject,
 				timer,
 				peer: this.normalizeId(peer),
+				onTaskStatus: opts?.onTaskStatus,
+				lastStatusSeq: 0,
+				resumeInFlight: false,
 			});
 		});
 		// The timeout or a stop() can settle it while the publish below is still
@@ -287,6 +399,53 @@ export class AgxClient {
 			);
 		}
 		return result;
+	}
+
+	/** Answer the current input-required question for a pending task. The original
+	 * request promise remains pending for the responder's terminal result. */
+	async resume(taskId: string, payload: unknown): Promise<void> {
+		const pending = this.pending.get(taskId);
+		if (!pending) {
+			throw new Error("AGX resume: unknown or already settled task");
+		}
+		const required = pending.inputRequired;
+		if (!required) {
+			throw new Error("AGX resume: task is not waiting for input");
+		}
+		if (required.expiresAt <= Math.floor(Date.now() / 1000)) {
+			throw new Error("AGX resume: input-required question expired");
+		}
+		if (pending.resumeInFlight) {
+			throw new Error("AGX resume: answer already published");
+		}
+		const problem = validateAgxJsonPayload(required.resumeSchema, payload);
+		if (problem) {
+			throw new Error(`AGX resume: invalid_resume_input: ${problem}`);
+		}
+		const envelope: TaskResumeEnvelope = {
+			t: "resume",
+			taskId,
+			seq: required.seq,
+			payload,
+		};
+		const text = encodeTaskEnvelope(envelope);
+		if (!this.fitsWire(text)) {
+			throw new Error("AGX resume: encoded payload exceeds the transport size limit");
+		}
+		pending.resumeInFlight = true;
+		try {
+			const sent = await this.transport.publishMessage(pending.peer, {
+				text,
+				contextId: taskId,
+				contentType: TASK_CONTENT_TYPE,
+			});
+			if (!sent.ok) {
+				throw new Error("AGX resume: publish failed");
+			}
+		} catch (error) {
+			pending.resumeInFlight = false;
+			throw error;
+		}
 	}
 
 	/** One poll → dispatch cycle. Drains inbound messages, dispatches task requests
@@ -353,6 +512,7 @@ export class AgxClient {
 		dispatched: number;
 		complete: boolean;
 	}> {
+		await this.suspensions.load();
 		// One clock read for the whole pump, taken BEFORE the poll: it is both the
 		// skew ceiling and, on a complete pump, the new cursor.
 		const nowSec = Math.floor(Date.now() / 1000);
@@ -571,12 +731,15 @@ export class AgxClient {
 		advertise?: boolean;
 	}): Promise<void> {
 		await this.transport.start?.();
+		await this.suspensions.load();
 		if (opts?.advertise !== false && this.transport.advertise) {
+			const skills = this.typedSkills();
 			await this.transport
 				.advertise(this.capabilities(), {
 					org: this.identity?.org,
 					nip05: this.identity?.nip05,
 					payloadTypes: [DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE],
+					...(skills.length > 0 ? { skills } : {}),
 				})
 				.catch((e) =>
 					this.log.warn?.("AGX: advertise failed", {
@@ -611,6 +774,7 @@ export class AgxClient {
 	 * are rejected (their result can no longer arrive) rather than left hanging. */
 	async stop(): Promise<void> {
 		this.running = false;
+		this.suspensions.stop();
 		if (this.pollTimer) {
 			clearTimeout(this.pollTimer);
 			this.pollTimer = undefined;
@@ -630,8 +794,8 @@ export class AgxClient {
 			// `contentType` is peer-supplied, so a task label can't be trusted to mean
 			// "this is task traffic for me". Consume it as a task ONLY when we can
 			// actually service it: a request for a capability WE registered, or a
-			// result correlated to a pending request of OURS. Anything else — an
-			// unknown capability, an unmatched/late result, a malformed envelope — is
+			// status/result correlated to a pending request of OURS. Anything else — an
+			// unknown capability, unmatched/late status/result, malformed envelope — is
 			// deliberately NOT auto-replied to (a reply would let any peer coax a
 			// signed event out of this identity) and NOT silently dropped; it falls
 			// through to `onMessage` so the host's own trust flow triages it exactly
@@ -640,6 +804,14 @@ export class AgxClient {
 			const env = parseTaskEnvelope(msg.text);
 			if (env?.t === "req" && this.handlers.has(env.capability)) {
 				await this.handleTaskRequest(msg, env);
+				return;
+			}
+			if (env?.t === "resume" && (await this.suspensions.has(env.taskId))) {
+				await this.suspensions.resume(msg, env);
+				return;
+			}
+			if (env?.t === "status" && this.pending.has(env.taskId)) {
+				await this.receiveTaskStatus(msg, env);
 				return;
 			}
 			if (env?.t === "res" && this.pending.has(env.taskId)) {
@@ -694,11 +866,30 @@ export class AgxClient {
 			await this.onMessage?.(msg);
 			return;
 		}
-		const handler = this.handlers.get(env.capability);
-		if (!handler) {
+		const registered = this.handlers.get(env.capability);
+		if (!registered) {
 			// Unreachable — dispatchMessage only routes here when a handler exists.
 			// Guard defensively and, crucially, do NOT auto-reply.
 			return;
+		}
+		if (registered.contract?.inputSchema) {
+			const problem = validateAgxJsonPayload(
+				registered.contract.inputSchema,
+				env.payload,
+			);
+			if (problem) {
+				this.log.info?.("AGX: task input failed schema validation", {
+					taskId: env.taskId,
+					capability: env.capability,
+					from: msg.from,
+					error: problem,
+				});
+				await this.sendResult(msg.from, env.taskId, {
+					status: "failed",
+					error: "invalid_input",
+				});
+				return;
+			}
 		}
 		// Best-effort delivery receipt (the task was accepted for processing).
 		await this.transport
@@ -719,14 +910,15 @@ export class AgxClient {
 			transportId: msg.transportId,
 			sentAt: msg.sentAt,
 		};
+		this.attachTaskControl(task, 0);
 		if (this.maxConcurrentTasks === 1) {
-			await this.runTask(msg, env, handler, task);
+			await this.runTask(msg, env, registered, task);
 			return;
 		}
 		while (this.runningTasks.size >= this.maxConcurrentTasks) {
 			await Promise.race(this.runningTasks);
 		}
-		const running: Promise<void> = this.runTask(msg, env, handler, task)
+		const running: Promise<void> = this.runTask(msg, env, registered, task)
 			.catch((err) =>
 				this.log.error?.("AGX: task failed outside its handler", {
 					taskId: env.taskId,
@@ -744,15 +936,66 @@ export class AgxClient {
 		}
 	}
 
+	private attachTaskControl(task: Task, seq: number): void {
+		let statusSeq = seq;
+		task.report = async (message) => {
+			statusSeq += 1;
+			await this.sendTaskStatus(task.from, {
+				t: "status",
+				taskId: task.taskId,
+				status: "working",
+				seq: statusSeq,
+				...(message === undefined ? {} : { message }),
+			});
+		};
+		task.requireInput = async (options) => {
+			statusSeq += 1;
+			return this.suspensions.requireInput(task, options, statusSeq);
+		};
+	}
+
 	/** Run a task's handler and send its result. */
 	private async runTask(
 		msg: AgxIncomingMessage,
 		env: TaskRequestEnvelope,
-		handler: TaskHandler,
+		registered: RegisteredTaskHandler,
 		task: Task,
 	): Promise<void> {
 		try {
-			const output = await handler(task);
+			const produced = await registered.handler(task);
+			const completion = produced instanceof AgxResumeCompletion
+				? produced
+				: undefined;
+			const output = completion ? completion.result.output : produced;
+			if (
+				registered.contract?.outputSchema &&
+				(!completion || completion.result.status === "completed")
+			) {
+				const problem = validateAgxJsonPayload(
+					registered.contract.outputSchema,
+					output,
+				);
+				if (problem) {
+					this.log.warn?.("AGX: task output failed schema validation", {
+						taskId: env.taskId,
+						capability: env.capability,
+						error: problem,
+					});
+					await this.sendResult(msg.from, env.taskId, {
+						status: "failed",
+						error: "invalid_output",
+					});
+					if (completion) {
+						await this.suspensions.finish(completion);
+					}
+					return;
+				}
+			}
+			if (completion) {
+				await this.sendResult(msg.from, env.taskId, completion.result);
+				await this.suspensions.finish(completion);
+				return;
+			}
 			await this.sendResult(msg.from, env.taskId, {
 				status: "completed",
 				output,
@@ -788,6 +1031,93 @@ export class AgxClient {
 					: "handler failed",
 			});
 		}
+	}
+
+	private async sendTaskStatus(
+		to: string,
+		env: TaskStatusEnvelope,
+	): Promise<void> {
+		const text = encodeTaskEnvelope(env);
+		if (
+			(env.status === "working" && (env.message?.length ?? 0) > 2000) ||
+			!this.fitsWire(text)
+		) {
+			this.log.warn?.("AGX: task status too large; dropping update", {
+				taskId: env.taskId,
+				seq: env.seq,
+			});
+			return;
+		}
+		await this.transport
+			.publishMessage(to, {
+				text,
+				contextId: env.taskId,
+				contentType: TASK_CONTENT_TYPE,
+			})
+			.catch((error) =>
+				this.log.warn?.("AGX: failed to publish task status", {
+					taskId: env.taskId,
+					seq: env.seq,
+					error: String(error),
+				}),
+			);
+	}
+
+	private async receiveTaskStatus(
+		msg: AgxIncomingMessage,
+		env: TaskStatusEnvelope,
+	): Promise<void> {
+		const pending = this.pending.get(env.taskId);
+		if (!pending) {
+			return;
+		}
+		if (this.normalizeId(msg.from) !== pending.peer) {
+			this.log.warn?.("AGX: task status from unexpected peer; dropping", {
+				taskId: env.taskId,
+				from: msg.from,
+				expected: pending.peer,
+			});
+			return;
+		}
+		if (env.seq <= pending.lastStatusSeq) {
+			this.log.debug?.("AGX: dropping duplicate or older task status", {
+				taskId: env.taskId,
+				seq: env.seq,
+				lastStatusSeq: pending.lastStatusSeq,
+			});
+			return;
+		}
+		if (env.status === "input-required") {
+			const problem = validateAgxJsonSchema(env.resumeSchema);
+			if (problem) {
+				this.log.warn?.("AGX: input-required schema invalid; dropping", {
+					taskId: env.taskId,
+					error: problem,
+				});
+				return;
+			}
+		}
+		const update: TaskStatusUpdate = env.status === "working"
+			? {
+				taskId: env.taskId,
+				status: env.status,
+				seq: env.seq,
+				...(env.message === undefined ? {} : { message: env.message }),
+			}
+			: {
+				taskId: env.taskId,
+				status: env.status,
+				seq: env.seq,
+				question: env.question,
+				resumeSchema: env.resumeSchema,
+				expiresAt: env.expiresAt,
+			};
+		if (env.status === "input-required") {
+			pending.inputRequired = env;
+			pending.resumeInFlight = false;
+		}
+		await pending.onTaskStatus?.(update);
+		pending.lastStatusSeq = env.seq;
 	}
 
 	private async sendResult(

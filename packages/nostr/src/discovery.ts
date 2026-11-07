@@ -1,3 +1,4 @@
+import type { AgxPeerCard } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import { z } from "zod";
 import { toNpub } from "./address";
@@ -5,6 +6,11 @@ import { CARD_KIND, RELAY_LIST_KIND } from "./kinds";
 import { fetchByAuthor, fetchByAuthorWithStatus } from "./relay-pool";
 import type { AgxSigner } from "./signer";
 import { assertPublicUrl } from "./ssrf";
+import {
+	type AgentCardExtension,
+	type AgentSkill,
+	parseAgentCardMetadata,
+} from "./typed-card";
 
 /**
  * NIP-AGX discovery: publish/resolve a signed, UNENCRYPTED Agent Card + NIP-65
@@ -13,6 +19,7 @@ import { assertPublicUrl } from "./ssrf";
  */
 
 export const CARD_VERSION = "1.0.0";
+export const TYPED_CARD_VERSION = "1.1.0";
 /** Cap peer-advertised relays we'll accept (SSRF blast-radius + fan-out). */
 const MAX_PEER_RELAYS = 10;
 /** Cap DISTINCT peer-advertised relay candidates we'll even DNS-check, so a card
@@ -41,6 +48,8 @@ export interface AgentCard {
 	payloadTypes: string[];
 	encryption: string[];
 	version: string;
+	skills?: AgentSkill[];
+	extensions?: AgentCardExtension[];
 }
 
 /** Build an Agent Card object for the given identity/metadata. */
@@ -52,7 +61,18 @@ export function buildCard(params: {
 	capabilities: string[];
 	payloadTypes: string[];
 	encryption?: string[];
+	skills?: AgentSkill[];
+	extensions?: AgentCardExtension[];
 }): AgentCard {
+	const declaredExtensions = new Set(
+		(params.extensions ?? []).map((extension) => extension.uri),
+	);
+	const typed = parseAgentCardMetadata(params, declaredExtensions);
+	if (typed.warning) {
+		throw new Error(typed.warning.message);
+	}
+	const hasTypedMetadata =
+		params.skills !== undefined || params.extensions !== undefined;
 	return {
 		v: 1,
 		org: params.org,
@@ -62,7 +82,11 @@ export function buildCard(params: {
 		capabilities: params.capabilities,
 		payloadTypes: params.payloadTypes,
 		encryption: params.encryption ?? ["nip44"],
-		version: CARD_VERSION,
+		version: hasTypedMetadata ? TYPED_CARD_VERSION : CARD_VERSION,
+		...(typed.skills === undefined ? {} : { skills: typed.skills }),
+		...(typed.extensions === undefined
+			? {}
+			: { extensions: typed.extensions }),
 	};
 }
 
@@ -143,11 +167,7 @@ export async function resolvePeerRelays(
 }
 
 /** A peer's Agent Card, as {@link resolvePeerCard} returns it. */
-export interface PeerCard {
-	displayName: string | null;
-	capabilities: string[];
-	nip05: string | null;
-}
+export type PeerCard = AgxPeerCard;
 
 /** Resolve a peer's Agent Card. Best-effort; null when none/malformed. */
 export async function resolvePeerCard(
@@ -210,10 +230,18 @@ function parsePeerCard(latest: Event | undefined): PeerCard | null {
 		return null;
 	}
 	const c = parsed.data;
+	const typed = parseAgentCardMetadata(raw);
 	return {
 		displayName: c.org ? c.org.slice(0, 120) : null,
 		capabilities: c.capabilities ?? [],
 		nip05: c.nip05 ?? null,
+		...(typed.skills === undefined ? {} : { skills: typed.skills }),
+		...(typed.extensions === undefined
+			? {}
+			: { extensions: typed.extensions }),
+		...(typed.warning === undefined
+			? {}
+			: { typedMetadataWarning: typed.warning }),
 	};
 }
 

@@ -8,8 +8,8 @@ import { z } from "zod";
  * while `AgxClient` interprets the lifecycle + correlation.
  */
 
-/** Task lifecycle states (A2A-aligned). v1 drives the terminal states via the
- * result envelope; `working` / `input-required` are reserved for status updates. */
+/** Task lifecycle states (A2A-aligned). Terminal states use the result envelope;
+ * `working` and `input-required` use status updates. */
 export type TaskState =
 	| "submitted"
 	| "working"
@@ -41,11 +41,79 @@ export const taskResultSchema = z.object({
 });
 export type TaskResultEnvelope = z.infer<typeof taskResultSchema>;
 
+const taskStatusBase = {
+	t: z.literal("status"),
+	taskId: z.string().min(1).max(200),
+	seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+};
+
+/** Nonterminal progress for a pending task. */
+export const taskWorkingSchema = z.object({
+	...taskStatusBase,
+	status: z.literal("working"),
+	message: z.string().max(2000).optional(),
+});
+export type TaskWorkingEnvelope = z.infer<typeof taskWorkingSchema>;
+
+export const taskInputQuestionSchema = z
+	.object({
+		kind: z.enum(["text", "choice", "confirmation"]),
+		prompt: z.string().min(1).max(2000),
+		options: z.array(z.string().min(1).max(200)).max(16).optional(),
+	})
+	.strict()
+	.superRefine((question, context) => {
+		if (question.kind === "choice" && !question.options?.length) {
+			context.addIssue({ code: "custom", message: "choice questions need options" });
+		}
+		if (question.kind !== "choice" && question.options !== undefined) {
+			context.addIssue({ code: "custom", message: "options belong only to choice questions" });
+		}
+	});
+export type TaskInputQuestion = z.infer<typeof taskInputQuestionSchema>;
+
+export const taskInputRequiredSchema = z.object({
+	...taskStatusBase,
+	status: z.literal("input-required"),
+	question: taskInputQuestionSchema,
+	resumeSchema: z.record(z.string(), z.unknown()),
+	expiresAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
+export type TaskInputRequiredEnvelope = z.infer<typeof taskInputRequiredSchema>;
+
+export const taskStatusSchema = z.discriminatedUnion("status", [
+	taskWorkingSchema,
+	taskInputRequiredSchema,
+]);
+export type TaskStatusEnvelope = z.infer<typeof taskStatusSchema>;
+export type TaskStatusUpdate =
+	| Omit<TaskWorkingEnvelope, "t">
+	| Omit<TaskInputRequiredEnvelope, "t">;
+
+export const taskResumeSchema = z.object({
+	t: z.literal("resume"),
+	taskId: z.string().min(1).max(200),
+	seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+	payload: z.unknown(),
+});
+export type TaskResumeEnvelope = z.infer<typeof taskResumeSchema>;
+
 export const taskEnvelopeSchema = z.discriminatedUnion("t", [
 	taskRequestSchema,
 	taskResultSchema,
+	taskStatusSchema,
+	taskResumeSchema,
 ]);
 export type TaskEnvelope = z.infer<typeof taskEnvelopeSchema>;
+
+export interface TaskInputRequiredOptions {
+	question: TaskInputQuestion;
+	resumeSchema: Record<string, unknown>;
+	/** JSON host state persisted locally for the resume handler. Never use secrets. */
+	state?: unknown;
+	/** Seconds until this question expires. Default 300; maximum 86400. */
+	timeoutSec?: number;
+}
 
 /** A task as delivered to a capability handler. */
 export interface Task<Payload = unknown> {
@@ -67,6 +135,14 @@ export interface Task<Payload = unknown> {
 	/** When the sender says it sent the request (unix seconds), if the transport
 	 * carries that. Sender-declared. */
 	sentAt?: number;
+	/** JSON host state restored for a resume handler. */
+	state?: unknown;
+	/** Publish a best-effort public `working` update. Client-created tasks always
+	 * provide this; optional for host-created task fixtures. */
+	report?: (message?: string) => Promise<void>;
+	/** Pause for typed public input and continue through the registered resume
+	 * handler. Client-created tasks provide this when a resume handler exists. */
+	requireInput?: (options: TaskInputRequiredOptions) => Promise<unknown>;
 }
 
 /** Serialize a task envelope for the message text field. */

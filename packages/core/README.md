@@ -23,9 +23,68 @@ const agx = new AgxClient({
 });
 
 // The runtime only writes handlers; the library owns dispatch → lifecycle → result → receipt.
-agx.handle("invoice.review", async (task) => paperclip.run(task.payload));
+agx.handle("invoice.review", async (task) => {
+  await task.report?.("reviewing");
+  return paperclip.run(task.payload);
+}, {
+  description: "Review an invoice against approval policy",
+  inputSchema: {
+    type: "object",
+    required: ["amount"],
+    properties: { amount: { type: "number", minimum: 0 } },
+  },
+  outputSchema: {
+    type: "object",
+    required: ["approved"],
+    properties: { approved: { type: "boolean" } },
+  },
+});
 
 await agx.start();
+
+const result = await agx.request(peer, "invoice.review", { amount: 25 }, {
+  validate: true, // Optional peer-card input preflight.
+  onTaskStatus(update) {
+    console.log(update.seq, update.message); // Ordered `working` updates; request stays pending.
+  },
+});
 ```
+
+Contracts are optional. Authorized invalid input returns `invalid_input` without running the handler;
+invalid handler output returns `invalid_output`. Detailed validation paths stay local. Legacy handlers
+and peers without typed schemas keep working, and validation never fetches a referenced schema.
+
+### Durable `input-required` resume
+
+Register a separate resume handler so the initial handler never repeats its earlier side effects:
+
+```ts
+agx.handle("invoice.approval", async (task) => task.requireInput?.({
+  question: { kind: "confirmation", prompt: "Approve invoice?" },
+  resumeSchema: {
+    type: "object",
+    required: ["approved"],
+    properties: { approved: { type: "boolean" } },
+  },
+  state: { invoiceId: 42 }, // Public JSON, never a secret.
+  timeoutSec: 300,
+}), { description: "Approve an invoice" }, async (task, input) => {
+  const { approved } = input as { approved: boolean };
+  return { approved, state: task.state };
+});
+
+const result = agx.request(peer, "invoice.approval", {}, {
+  onTaskStatus(update) {
+    if (update.status === "input-required") {
+      void agx.resume(update.taskId, { approved: true });
+    }
+  },
+});
+```
+
+Inject `suspensions` with a durable `AgxSuspensionStore` to recover after restart. The default is
+in-memory. Resume binds to the original peer, task ID, and question sequence; invalid, duplicate,
+wrong-peer, expired, and interrupted responses do not rerun the resume handler. Request timeout is
+not extended, so choose it to cover the expected answer wait.
 
 > Status: **0.2.0 (draft)** — API is stabilizing alongside the NIP-AGX spec (`SPEC.md`).

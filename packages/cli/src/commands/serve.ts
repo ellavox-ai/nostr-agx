@@ -14,6 +14,7 @@ import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
 import { createCollector } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
+import { FileSuspensionStore } from "../lib/gateway/suspensions.js";
 import {
 	neutralizeControls,
 	oneLineJson,
@@ -227,6 +228,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	const client = new AgxClient({
 		transport,
 		seen,
+		suspensions: new FileSuspensionStore(profileName),
 		logger,
 		identity: { org: profile.org ?? undefined, nip05: profile.nip05 },
 		startCursor: state.cursor,

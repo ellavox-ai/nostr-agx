@@ -1,7 +1,9 @@
 import {
+	type AgentSkill,
 	CARD_KIND,
 	fetchByAuthor,
 	fetchNip05Pubkey,
+	parseAgentCardMetadata,
 	parseNip05,
 	RELAY_LIST_KIND,
 	verifyEvent,
@@ -31,6 +33,7 @@ export interface CardOptions {
 	relay?: string[];
 	raw?: boolean;
 	verify?: boolean;
+	skill?: string;
 }
 
 type VerdictKind = "verified" | "mismatch" | "unreachable" | "none";
@@ -111,6 +114,26 @@ interface ParsedCard {
 	version?: string;
 }
 
+function printSkill(skill: AgentSkill): void {
+	say("");
+	heading(`Skill — ${skill.id}`);
+	kv("description", skill.description);
+	kv("tags", skill.tags?.join(", ") || "—");
+	kv("input modes", skill.inputModes?.join(", ") || "—");
+	kv("output modes", skill.outputModes?.join(", ") || "—");
+	kv("features", skill.features?.join(", ") || "—");
+	if (skill.inputSchema) {
+		say("");
+		heading("Input schema");
+		say(JSON.stringify(skill.inputSchema, null, 2));
+	}
+	if (skill.outputSchema) {
+		say("");
+		heading("Output schema");
+		say(JSON.stringify(skill.outputSchema, null, 2));
+	}
+}
+
 export async function cardCommand(
 	peer: string,
 	options: CardOptions,
@@ -163,6 +186,20 @@ export async function cardCommand(
 		);
 	}
 
+	const typedMetadata = parseAgentCardMetadata(card);
+	const selectedSkill = options.skill
+		? typedMetadata.skills?.find((skill) => skill.id === options.skill)
+		: undefined;
+	if (options.skill && !selectedSkill) {
+		const warning = typedMetadata.warning
+			? ` ${typedMetadata.warning.message}`
+			: "";
+		throw new AgxCliError(
+			`No valid typed skill "${options.skill}" found on this Agent Card.${warning}`,
+			{ exitCode: EXIT.remote },
+		);
+	}
+
 	heading(card.org ? `Agent Card — ${card.org}` : "Agent Card");
 	kv("npub", toDisplayNpub(pubkey));
 	kv("capabilities", (card.capabilities ?? []).join(", ") || "—");
@@ -182,6 +219,28 @@ export async function cardCommand(
 		warn(
 			"The signature does not verify. Anything on this card is unattributable.",
 		);
+	}
+	if (typedMetadata.warning) {
+		warn(typedMetadata.warning.message);
+	}
+	if (typedMetadata.skills?.length) {
+		say("");
+		heading("Skills");
+		for (const skill of typedMetadata.skills) {
+			say(`  ${skill.id} — ${skill.description}`);
+		}
+	}
+	if (typedMetadata.extensions?.length) {
+		say("");
+		heading("Extensions");
+		for (const extension of typedMetadata.extensions) {
+			say(
+				`  ${extension.uri} (${extension.required ? "required" : "optional"})`,
+			);
+		}
+	}
+	if (selectedSkill) {
+		printSkill(selectedSkill);
 	}
 
 	let verdict: Nip05Verdict | null = null;
@@ -260,5 +319,12 @@ export async function cardCommand(
 		),
 	);
 
-	json({ card, event: cardEvent, signatureValid, nip05: verdict });
+	json({
+		card,
+		typedMetadata,
+		selectedSkill,
+		event: cardEvent,
+		signatureValid,
+		nip05: verdict,
+	});
 }

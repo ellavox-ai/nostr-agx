@@ -19,6 +19,7 @@ export { verifyEvent } from "nostr-tools";
 
 export * from "./address";
 export * from "./discovery";
+export * from "./typed-card";
 export * from "./events";
 // Explicit, not `export *`: giftwrap.ts also holds a test-only miner seam that
 // must not become public API. Tests import it from "./giftwrap" directly.

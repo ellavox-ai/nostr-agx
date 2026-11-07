@@ -1,3 +1,4 @@
+import type { AgxJsonSchema } from "./json-schema";
 import type {
 	ExchangeEvidence,
 	ParsedExchangeMessage,
@@ -135,6 +136,7 @@ export interface AgxTransport {
 			org?: string;
 			nip05?: string | null;
 			payloadTypes?: string[];
+			skills?: AgxAgentSkill[];
 		},
 	): Promise<{ ok: boolean }>;
 
@@ -186,11 +188,35 @@ export interface AgxPollResult {
 	discarded?: string[];
 }
 
+export interface AgxAgentSkill {
+	id: string;
+	description: string;
+	tags?: string[];
+	inputModes?: string[];
+	outputModes?: string[];
+	inputSchema?: AgxJsonSchema;
+	outputSchema?: AgxJsonSchema;
+	features?: string[];
+}
+
+export interface AgxAgentCardExtension {
+	uri: string;
+	required?: boolean;
+}
+
+export interface AgxAgentCardMetadataWarning {
+	code: "invalid_typed_metadata" | "unsupported_required_extension";
+	message: string;
+}
+
 export interface AgxPeerCard {
 	displayName: string | null;
 	capabilities: string[];
 	/** Claimed (unverified) domain identity, e.g. NIP-05 `name@domain`. */
 	nip05: string | null;
+	skills?: AgxAgentSkill[];
+	extensions?: AgxAgentCardExtension[];
+	typedMetadataWarning?: AgxAgentCardMetadataWarning;
 }
 
 export interface AgxResolvedPeer {

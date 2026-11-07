@@ -1,4 +1,9 @@
-import { AgxClient, type AgxLogger, type AgxTransport } from "@nostr-agx/core";
+import {
+	AgxClient,
+	type AgxLogger,
+	type AgxTransport,
+	type TaskStatusUpdate,
+} from "@nostr-agx/core";
 import { MAX_WRAP_BACKDATE_SEC } from "@nostr-agx/nostr";
 
 /** How often the inbox is polled for results while requests are waiting. */
@@ -51,12 +56,16 @@ export class Requester {
 		payload: unknown,
 		timeoutMs: number,
 		signal?: AbortSignal,
+		onTaskStatus?: (update: TaskStatusUpdate) => void | Promise<void>,
 	): Promise<unknown> {
 		if (this.waiting === 0 && nowSec() - this.lastPolledSec > MAX_WRAP_BACKDATE_SEC) {
 			this.client = this.newClient();
 			this.lastPolledSec = nowSec();
 		}
-		const result = this.client.request(peer, capability, payload, { timeoutMs });
+		const result = this.client.request(peer, capability, payload, {
+			timeoutMs,
+			onTaskStatus,
+		});
 		// Settled by its timeout even when nobody waits for it any more.
 		result.catch(() => undefined);
 		this.waiting += 1;
@@ -78,6 +87,11 @@ export class Requester {
 				signal?.removeEventListener("abort", onAbort);
 			}
 		}
+	}
+
+	/** Answer an input-required question on the shared requester client. */
+	async resume(taskId: string, payload: unknown): Promise<void> {
+		await this.client.resume(taskId, payload);
 	}
 
 	stop(): void {

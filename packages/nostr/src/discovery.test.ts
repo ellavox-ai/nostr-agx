@@ -86,6 +86,46 @@ describe("resolvePeerCard — attacker-controlled card validation", () => {
 			nip05: "acme@example.com",
 		});
 	});
+
+	it("returns validated typed metadata alongside legacy capabilities", async () => {
+		mockFetchByAuthor.mockResolvedValue([
+			cardEvent({
+				org: "Acme",
+				capabilities: ["invoice.review"],
+				skills: [{ id: "invoice.review", description: "Review an invoice" }],
+				extensions: [{ uri: "agx.task-status.v1", required: false }],
+			}),
+		]);
+		expect(await resolvePeerCard(PUBKEY, ["wss://r"])).toEqual({
+			displayName: "Acme",
+			capabilities: ["invoice.review"],
+			nip05: null,
+			skills: [{ id: "invoice.review", description: "Review an invoice" }],
+			extensions: [{ uri: "agx.task-status.v1", required: false }],
+		});
+	});
+
+	it("preserves legacy discovery and warns when typed metadata is invalid", async () => {
+		mockFetchByAuthor.mockResolvedValue([
+			cardEvent({
+				org: "Acme",
+				nip05: "acme@example.com",
+				capabilities: ["invoice.review"],
+				skills: [
+					{ id: "invoice.review", description: "one" },
+					{ id: "invoice.review", description: "duplicate" },
+				],
+			}),
+		]);
+		const card = await resolvePeerCard(PUBKEY, ["wss://r"]);
+		expect(card).toMatchObject({
+			displayName: "Acme",
+			capabilities: ["invoice.review"],
+			nip05: "acme@example.com",
+			typedMetadataWarning: { code: "invalid_typed_metadata" },
+		});
+		expect(card).not.toHaveProperty("skills");
+	});
 });
 
 describe("resolvePeerCardWithStatus — an outage is not an empty answer", () => {
