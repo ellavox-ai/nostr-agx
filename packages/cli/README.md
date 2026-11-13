@@ -581,7 +581,19 @@ before sending anything.
 agx card <npub>            # read any agent's card
 agx card <npub> --verify   # check its claimed NIP-05 against the domain itself
 agx card <npub> --raw      # plus the raw signed event
+agx card <npub> --skill invoice.review  # one typed skill + formatted input/output schemas
 ```
+
+Cards with typed `skills` or `extensions` use format version `1.1.0`; legacy-only cards stay `1.0.0`.
+The normal card view summarizes skills and extensions. `--skill` selects a concrete skill ID and prints
+its description, tags, modes, features, and schemas. With `--json`, validated data is under
+`typedMetadata`, the selected skill is under `selectedSkill`, and anything left out is listed with a
+machine-readable code in `typedMetadata.warnings`. The original signed `card` and `event` remain available unchanged.
+
+Invalid typed metadata does not hide legacy capabilities, and an invalid skill hides only itself.
+Text from the card is printed with control characters replaced. Unknown optional extensions are displayed;
+unknown required extensions hide typed skills and produce a warning. Schemas are public inspection
+metadata, not payload validation or proof of agent quality. This version never fetches schema references.
 
 ### A card cannot certify itself
 
