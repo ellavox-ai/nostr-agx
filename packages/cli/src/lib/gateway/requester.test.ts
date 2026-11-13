@@ -1,5 +1,5 @@
-import type { AgxPollResult, AgxTransport } from "@nostr-agx/core";
-import { describe, expect, it } from "vitest";
+import type { AgxPollResult, AgxTransport, PendingRequestStore } from "@nostr-agx/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Requester } from "./requester.js";
 
 /** A transport that sends, and never brings a result back. */
@@ -19,6 +19,10 @@ function silentTransport() {
 }
 
 describe("Requester", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	it("stops waiting, and polling, when its caller goes away", async () => {
 		const { transport, polls } = silentTransport();
 		const requester = new Requester(transport);
@@ -33,5 +37,50 @@ describe("Requester", () => {
 		// Nobody waits: the result poll has stopped.
 		expect(polls()).toBeLessThanOrEqual(after + 1);
 		requester.stop();
+	});
+
+	it("restores the full gateway waiting capacity", async () => {
+		const { transport } = silentTransport();
+		const records = Array.from({ length: 320 }, (_, index) => ({
+			key: `operation-${index}`,
+			taskId: `task-${index}`,
+			peer: "peer",
+			capability: "x.y",
+			deadlineAt: null,
+			phase: "waiting" as const,
+		}));
+		const store: PendingRequestStore = {
+			list: () => records,
+			save: () => undefined,
+			remove: () => undefined,
+		};
+		const requester = new Requester(transport, undefined, store);
+		const recovered = await requester.restore();
+		expect(recovered).toHaveLength(320);
+		await requester.stop();
+	});
+
+	it("replaces its client once after a long idle spell, not on every request that settles before a poll", async () => {
+		const { transport } = silentTransport();
+		let lists = 0;
+		const store: PendingRequestStore = {
+			list: () => {
+				lists += 1;
+				return [];
+			},
+			save: () => undefined,
+			remove: () => undefined,
+		};
+		const requester = new Requester(transport, undefined, store);
+		// Only the clock moves: the result poll's own timers stay real.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(Date.now() + 3 * 24 * 60 * 60 * 1000);
+		const gone = new AbortController();
+		gone.abort();
+		await expect(requester.request("peer", "x.y", {}, 60_000, gone.signal)).rejects.toThrow("abandoned");
+		await expect(requester.request("peer", "x.y", {}, 60_000, gone.signal)).rejects.toThrow("abandoned");
+		// One replacement for the idle spell, so one restore: the second request reuses it.
+		expect(lists).toBe(1);
+		await requester.stop();
 	});
 });
