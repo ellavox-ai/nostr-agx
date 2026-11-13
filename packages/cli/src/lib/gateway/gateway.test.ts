@@ -15,7 +15,7 @@ import { profileDir, seenPath } from "../paths.js";
 import { MESSAGES_FILE } from "../store/message-store.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import { type RunningGateway, startGateway } from "./gateway.js";
-import { createGatewayKey } from "./keys.js";
+import { createGatewayKey, revokeGatewayKey } from "./keys.js";
 
 /**
  * `agx gateway` end to end: a real gateway on a sandboxed profile, the CLI's
@@ -109,6 +109,90 @@ async function json(res: Response): Promise<Record<string, unknown>> {
 	return (await res.json()) as Record<string, unknown>;
 }
 
+async function readSse(
+	res: Response,
+	client: AgxClient,
+	until: (text: string) => boolean,
+): Promise<string> {
+	if (!res.body) {
+		throw new Error("SSE response has no body");
+	}
+	const reader = res.body.getReader();
+	const reading = (async () => {
+		const decoder = new TextDecoder();
+		const deadline = Date.now() + 10_000;
+		let text = "";
+		try {
+			while (!until(text)) {
+				if (Date.now() > deadline) {
+					throw new Error(`SSE did not reach expected state: ${text}`);
+				}
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				text += decoder.decode(value, { stream: true });
+			}
+			return text;
+		} finally {
+			await reader.cancel().catch(() => undefined);
+		}
+	})();
+	return pumping(reading, client);
+}
+
+/** Read one SSE connection in steps, keeping it open between them. */
+function sseConnection(res: Response) {
+	if (!res.body) {
+		throw new Error("SSE response has no body");
+	}
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	let ended = false;
+	const read = (client: AgxClient, until: (text: string) => boolean) =>
+		pumping(
+			(async () => {
+				const deadline = Date.now() + 10_000;
+				while (!ended && !until(text)) {
+					const remaining = deadline - Date.now();
+					if (remaining <= 0) {
+						await reader.cancel().catch(() => undefined);
+						throw new Error(`SSE did not reach expected state: ${text}`);
+					}
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					const chunk = await Promise.race([
+						reader.read(),
+						new Promise<null>((resolve) => {
+							timer = setTimeout(() => resolve(null), remaining);
+						}),
+					]).finally(() => clearTimeout(timer));
+					if (chunk === null) {
+						continue;
+					}
+					if (chunk.done) {
+						ended = true;
+						break;
+					}
+					text += decoder.decode(chunk.value, { stream: true });
+				}
+				return text;
+			})(),
+			client,
+		);
+	return {
+		readUntil: read,
+		/** Read until the server ends the connection; fails if it never does. */
+		readToEnd: async (client: AgxClient) => {
+			const all = await read(client, () => false);
+			if (!ended) {
+				throw new Error(`SSE connection did not end: ${all}`);
+			}
+			return all;
+		},
+	};
+}
+
 /** Pump `client` until `promise` settles. */
 async function pumping<T>(promise: Promise<T>, client: AgxClient): Promise<T> {
 	let settled = false;
@@ -166,7 +250,7 @@ async function subscribe(body: Record<string, unknown>) {
 
 /** One task per webhook at a time, so a test can make one wait its turn. */
 function gatewayOptions() {
-	return { profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100], maxTasksPerWebhook: 1 };
+	return { profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100], maxTasksPerWebhook: 1, taskSseHeartbeatMs: 50 };
 }
 
 async function backgroundTask(id: string) {
@@ -686,6 +770,230 @@ describe("agx gateway: outbound", () => {
 		expect(await json(replay)).toEqual(completed);
 		expect(runs).toBe(1);
 	}, 30_000);
+
+	it("streams working updates and replays the stored terminal result without rerunning", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		reviewer.client.handle("invoice.background.stream", async (_task, ctx) => {
+			runs += 1;
+			await ctx.report("reviewing");
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { run: runs };
+		});
+		const acceptedResponse = await api("/v1/tasks", {
+			method: "POST",
+			body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.stream", background: true, timeoutSec: 20 }),
+		});
+		expect(acceptedResponse.status).toBe(202);
+		const id = (await json(acceptedResponse)).id as string;
+		const otherKey = createGatewayKey(profile, "sse-other-credential").key;
+		expect((await api(`/v1/tasks/${id}/events`, { key: otherKey })).status).toBe(404);
+		expect((await api("/v1/tasks/task_00000000-0000-0000-0000-000000000000/events")).status).toBe(404);
+
+		const liveResponse = await api(`/v1/tasks/${id}/events`);
+		expect(liveResponse.status).toBe(200);
+		expect(liveResponse.headers.get("content-type")).toContain("text/event-stream");
+		expect(liveResponse.headers.get("cache-control")).toBe("no-store, no-transform");
+		expect(liveResponse.headers.get("x-accel-buffering")).toBe("no");
+		// `retry` is an SSE field in the stream body, not an HTTP header.
+		expect(liveResponse.headers.get("retry")).toBeNull();
+		const live = sseConnection(liveResponse);
+		const early = await live.readUntil(
+			reviewer.client,
+			(text) => text.includes("event: working") && text.includes(": heartbeat"),
+		);
+		expect(early).toContain("retry: 1000\n");
+		const workingId = /id: (\d+)\nevent: working/.exec(early)?.[1];
+		expect(workingId).toMatch(/^\d+$/);
+		expect(early).toContain('"message":"reviewing"');
+		expect(early).not.toContain("event: completed");
+		expect(await backgroundTask(id)).toMatchObject({ status: "running" });
+
+		release();
+		// The connection opened while the task ran sees the terminal event, once, and then ends.
+		const liveEnd = await live.readToEnd(reviewer.client);
+		expect(liveEnd.match(/event: completed/g)).toHaveLength(1);
+		expect(liveEnd.indexOf("event: completed")).toBeGreaterThan(liveEnd.indexOf("event: working"));
+		expect(liveEnd).toContain('"run":1');
+		// A browser EventSource reconnects after the server ends the stream; once it
+		// has the terminal event, 204 tells it to stop.
+		const terminalId = /id: (\d+)\nevent: completed/.exec(liveEnd)?.[1];
+		expect(terminalId).toBeDefined();
+		const done = await api(`/v1/tasks/${id}/events`, {
+			headers: { "last-event-id": String(terminalId) },
+		});
+		expect(done.status).toBe(204);
+		expect(await done.text()).toBe("");
+		const completed = await settledBackgroundTask(id, reviewer.client);
+		expect(completed).toMatchObject({ status: "completed", result: { output: { run: 1 } } });
+		const replayResponse = await api(`/v1/tasks/${id}/events`, {
+			headers: { "last-event-id": String(workingId) },
+		});
+		const replay = await readSse(
+			replayResponse,
+			reviewer.client,
+			(text) => text.includes("event: completed"),
+		);
+		expect(replay).not.toContain("event: working");
+		expect(replay).toContain('"status":"completed"');
+		expect(replay).toContain('"run":1');
+
+		await gateway.close();
+		gateway = await startGateway(gatewayOptions());
+		const restoredResponse = await api(`/v1/tasks/${id}/events`, {
+			headers: { "last-event-id": String(workingId) },
+		});
+		const restored = await readSse(
+			restoredResponse,
+			reviewer.client,
+			(text) => text.includes("event: completed"),
+		);
+		expect(restored).toContain('"status":"completed"');
+		expect(restored).toContain('"run":1');
+		expect(runs).toBe(1);
+	}, 45_000);
+
+	it("refuses a third task stream for one credential until one closes", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let release: () => void = () => undefined;
+		let started = false;
+		reviewer.client.handle("invoice.background.capped", async () => {
+			started = true;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { ok: true };
+		});
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), maxTaskStreamsPerCredential: 2 });
+		const aborts: AbortController[] = [];
+		const stream = (id: string) => {
+			const abort = new AbortController();
+			aborts.push(abort);
+			return api(`/v1/tasks/${id}/events`, { signal: abort.signal });
+		};
+		let id: string | undefined;
+		try {
+			const accepted = await api("/v1/tasks", {
+				method: "POST",
+				body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.capped", background: true, timeoutSec: 20 }),
+			});
+			expect(accepted.status).toBe(202);
+			id = (await json(accepted)).id as string;
+			await waitForPeer(() => started, reviewer.client);
+			expect((await stream(id)).status).toBe(200);
+			expect((await stream(id)).status).toBe(200);
+			const refused = await stream(id);
+			expect(refused.status).toBe(429);
+			expect(refused.headers.get("retry-after")).toBe("5");
+			expect(await json(refused)).toMatchObject({ error: { code: "too_many_streams" } });
+
+			// The server frees the slot once it sees the client go.
+			aborts[0].abort();
+			let reopened = 0;
+			for (let attempt = 0; attempt < 50 && reopened !== 200; attempt += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				const res = await stream(id);
+				reopened = res.status;
+				if (reopened !== 200) {
+					await res.body?.cancel();
+				}
+			}
+			expect(reopened).toBe(200);
+		} finally {
+			for (const abort of aborts) {
+				abort.abort();
+			}
+			release();
+			if (id !== undefined) {
+				await settledBackgroundTask(id, reviewer.client);
+			}
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 45_000);
+
+	it("ends an open task stream when its API key is revoked, and refuses the reconnect", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let release: () => void = () => undefined;
+		let started = false;
+		reviewer.client.handle("invoice.background.revoked", async () => {
+			started = true;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { ok: true };
+		});
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), taskSseRevalidateMs: 50 });
+		const revocable = createGatewayKey(profile, "sse-revoked");
+		let id: string | undefined;
+		try {
+			const accepted = await api("/v1/tasks", {
+				method: "POST",
+				key: revocable.key,
+				body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.revoked", background: true, timeoutSec: 20 }),
+			});
+			expect(accepted.status).toBe(202);
+			id = (await json(accepted)).id as string;
+			await waitForPeer(() => started, reviewer.client);
+			const open = await api(`/v1/tasks/${id}/events`, { key: revocable.key });
+			expect(open.status).toBe(200);
+			const live = sseConnection(open);
+			await live.readUntil(reviewer.client, (text) => text.includes(": connected"));
+
+			expect(revokeGatewayKey(profile, revocable.id)).toBe(true);
+			const ended = await live.readToEnd(reviewer.client);
+			expect(ended).not.toContain("event: completed");
+			expect((await api(`/v1/tasks/${id}/events`, { key: revocable.key })).status).toBe(401);
+		} finally {
+			release();
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 45_000);
+
+	it("closes an open task stream on shutdown", async () => {
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let release: () => void = () => undefined;
+		let started = false;
+		reviewer.client.handle("invoice.background.shutdown", async () => {
+			started = true;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { ok: true };
+		});
+		try {
+			const accepted = await api("/v1/tasks", {
+				method: "POST",
+				body: JSON.stringify({ peer: reviewer.npub, capability: "invoice.background.shutdown", background: true, timeoutSec: 20 }),
+			});
+			const id = (await json(accepted)).id as string;
+			await waitForPeer(() => started, reviewer.client);
+			const open = await api(`/v1/tasks/${id}/events`);
+			expect(open.status).toBe(200);
+			const live = sseConnection(open);
+			await live.readUntil(reviewer.client, (text) => text.includes(": connected"));
+
+			const closing = Date.now();
+			await gateway.close();
+			expect(Date.now() - closing).toBeLessThan(9_000);
+			// Shutdown closes the socket: the reader sees the stream end or the
+			// connection terminate, never a stream left hanging.
+			const outcome = await live.readToEnd(reviewer.client).then(
+				() => "ended",
+				(error: Error) => error.message,
+			);
+			expect(["ended", "terminated"]).toContain(outcome);
+		} finally {
+			release();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 45_000);
 
 	it("restores completed and failed background outcomes after restart", async () => {
 		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });

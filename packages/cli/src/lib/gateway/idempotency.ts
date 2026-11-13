@@ -287,6 +287,8 @@ export class TaskOperationStore {
 		key: string | null,
 		body: unknown,
 		operation: () => Promise<Record<string, unknown>>,
+		/** Called with the public ID once the outcome is stored. */
+		onSettled?: (publicId: string) => void,
 	): Record<string, unknown> {
 		this.assertOpen();
 		if (this.prune()) {
@@ -345,6 +347,13 @@ export class TaskOperationStore {
 			this.backgroundInFlight.delete(id);
 			if (this.inFlight.get(id) === running) {
 				this.inFlight.delete(id);
+			}
+			try {
+				onSettled?.(publicId);
+			} catch (error) {
+				this.log(
+					`Background task ${publicId} settle callback failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 		});
 		return this.view(created);

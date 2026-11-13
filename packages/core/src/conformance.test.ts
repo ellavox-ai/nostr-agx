@@ -29,6 +29,7 @@ describe("task-envelope conformance vectors", () => {
 			"completed",
 			"failed",
 			"input-required",
+			"working",
 		]);
 		expect(valid.length).toBeGreaterThan(0);
 		expect(suite.vectors.length - valid.length).toBeGreaterThan(0);

@@ -340,6 +340,63 @@ async function waitForStatus(
 }
 
 describe("TaskOperationStore background tasks", () => {
+	it("logs an onSettled that throws instead of rejecting", async () => {
+		const lines: string[] = [];
+		const store = new TaskOperationStore("test", { log: (line) => lines.push(line) });
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		try {
+			const accepted = store.submit(
+				"credential-a",
+				null,
+				{ background: true },
+				async () => ({ status: "completed" }),
+				() => {
+					throw new Error("listener broke");
+				},
+			);
+			await vi.waitFor(() => expect(lines.some((line) => line.includes("listener broke"))).toBe(true));
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(unhandled).not.toHaveBeenCalled();
+			expect(store.get("credential-a", accepted.id as string)).toMatchObject({ status: "completed" });
+		} finally {
+			process.off("unhandledRejection", unhandled);
+			store.close();
+		}
+	});
+
+	it("calls onSettled with the public id after the outcome is stored", async () => {
+		const store = new TaskOperationStore("test");
+		const seen: Array<[string, unknown]> = [];
+		const onSettled = (id: string) => {
+			seen.push([id, store.get("credential-a", id)?.status]);
+		};
+		const ok = store.submit(
+			"credential-a",
+			null,
+			{ background: true, n: 1 },
+			async () => ({ status: "completed" }),
+			onSettled,
+		);
+		const bad = store.submit(
+			"credential-a",
+			null,
+			{ background: true, n: 2 },
+			async () => {
+				throw new ApiError(502, "task_failed", "The peer failed");
+			},
+			onSettled,
+		);
+		await vi.waitFor(() => expect(seen).toHaveLength(2));
+		expect(seen).toEqual(
+			expect.arrayContaining([
+				[ok.id, "completed"],
+				[bad.id, "failed"],
+			]),
+		);
+		store.close();
+	});
+
 	it("returns a handle before completion and restores the result only for its credential", async () => {
 		const store = new TaskOperationStore("test");
 		let runs = 0;

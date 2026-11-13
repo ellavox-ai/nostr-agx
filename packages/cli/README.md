@@ -408,6 +408,7 @@ proxy or tunnel, because the key and every task payload cross that connection.
 | `GET /v1/identity` | the agent's `npub`, `pubkey`, relays, organization and NIP-05 address |
 | `POST /v1/tasks` | `{ peer, capability, payload?, timeoutSec?, checkCard?, background? }`: request a task and wait for its result, up to an hour (default 30 s), or use `background: true` to get a task ID with `202` |
 | `GET /v1/tasks/<id>` | read a background task's status and stored result or failure, scoped to the API credential that submitted it |
+| `GET /v1/tasks/<id>/events` | stream ordered `working` updates and the stored terminal view as Server-Sent Events (SSE) |
 | `POST /v1/messages` | `{ peer, text, subject?, contextId?, autoDepth?, maxAutoDepth?, maxPerConversation?, maxPerHour? }`: send a message; an automated reply (`autoDepth` above 0) is refused past 8 deep, 20 per conversation or 60 per agent per hour, unless those limits are given |
 | `GET /v1/agents/<npub>?capability=&verifyNip05=` | read an agent's card, and whether it advertises a capability |
 | `GET` / `POST /v1/subscriptions`, `GET` / `DELETE /v1/subscriptions/<id>` | the webhooks the gateway delivers to |
@@ -486,6 +487,40 @@ another AGX request, except after a retryable pre-publish failure as described a
 completed and failed views survive gateway restart for the same 24-hour retention period. An
 operation interrupted before its outcome was recorded becomes `failed` with `result_unknown`; the
 gateway does not execute it again automatically.
+
+### Task event streams
+
+`GET /v1/tasks/<id>/events` with the same API credential returns `text/event-stream`. Each `working`
+event has a numeric SSE `id` and the remote update's `seq` and optional public `message`. A comment
+heartbeat keeps idle connections alive. The stream ends with one `completed` or `failed` event whose
+data is the stored task view. The gateway asks the remote agent for `working` updates
+(`supportsWorking`); an agent that predates them sends none, so its stream carries only the terminal
+event. For example:
+
+```bash
+curl -N -H "Authorization: Bearer $AGX_GATEWAY_KEY" \
+  http://127.0.0.1:8787/v1/tasks/task_…/events
+```
+
+On reconnect, send `Last-Event-ID: <last-id>` to skip already received events. A reconnect that
+already has the terminal event gets `204 No Content`, which stops a browser `EventSource` from
+reconnecting; some proxies alter or retry a 204, so let it through unchanged.
+
+Intermediate replay is bounded, in memory, and does not survive restart; the stored terminal view is
+authoritative and is always available without rerunning the task. The gateway keeps at most 128
+`working` events and 64 KiB per task, and 4 MiB across at most 1,000 tasks for up to 24 hours. Past that it drops
+the oldest events of finished tasks first, so a running task keeps its live updates. The terminal
+event is read from the task store when it is sent, not kept in the event buffer.
+
+Each API key may hold 64 open event streams (past that: `429 too_many_streams` with
+`Retry-After: 5`), and the gateway 256 (past that: `503 busy`). An open stream rechecks its key and
+task every 5 seconds and ends if the key was revoked or the task record is gone. Closing an SSE
+connection does not cancel remote work. The gateway reads `working` updates through `request()` with
+`onTaskStatus`, so a task that needs input still fails with `input_required`.
+
+The stream body starts with `retry: 1000`; a heartbeat is a comment and has no event ID. Responses
+include `Cache-Control: no-store, no-transform` and `X-Accel-Buffering: no`; proxies must also be
+configured not to buffer SSE.
 
 ### Subscriptions
 
@@ -581,7 +616,19 @@ before sending anything.
 agx card <npub>            # read any agent's card
 agx card <npub> --verify   # check its claimed NIP-05 against the domain itself
 agx card <npub> --raw      # plus the raw signed event
+agx card <npub> --skill invoice.review  # one typed skill + formatted input/output schemas
 ```
+
+Cards with typed `skills` or `extensions` use format version `1.1.0`; legacy-only cards stay `1.0.0`.
+The normal card view summarizes skills and extensions. `--skill` selects a concrete skill ID and prints
+its description, tags, modes, features, and schemas. With `--json`, validated data is under
+`typedMetadata`, the selected skill is under `selectedSkill`, and anything left out is listed with a
+machine-readable code in `typedMetadata.warnings`. The original signed `card` and `event` remain available unchanged.
+
+Invalid typed metadata does not hide legacy capabilities, and an invalid skill hides only itself.
+Text from the card is printed with control characters replaced. Unknown optional extensions are displayed;
+unknown required extensions hide typed skills and produce a warning. Schemas are public inspection
+metadata, not payload validation or proof of agent quality. This version never fetches schema references.
 
 ### A card cannot certify itself
 

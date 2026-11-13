@@ -20,7 +20,7 @@ WHEN an implementation runs `conformance/task-envelopes.json` THEN it SHALL acce
 pnpm --filter @nostr-agx/core exec vitest run src/conformance.test.ts
 ```
 
-Pass: every vector passes, vector IDs are unique, every valid vector includes its expected envelope, the vectors cover all four envelope types and all three `res` statuses, and the `spec` anchor resolves to a heading in the SPEC.
+Pass: every vector passes, vector IDs are unique, every valid vector includes its expected envelope, the vectors cover all four envelope types and all four `res` statuses, and the `spec` anchor resolves to a heading in the SPEC.
 
 For valid vectors the reference test also checks that `encodeTaskEnvelope` on the parsed envelope produces JSON equal to the expected envelope. That round-trip is a check on this TypeScript implementation only. It is not part of the contract, and another implementation need not reproduce it.
 

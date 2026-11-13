@@ -37,7 +37,7 @@ AGX core separates task handling from message delivery. This repository provides
 
 The reference implementation supports publishing and reading Agent Cards, checking capabilities, and exchanging tasks with completed, failed, or input-required states. A streaming requester can provide input as a continuation of the same task. It also provides authorization checks, delivery receipts, and replay protection.
 
-Input-required handler waits are in memory and do not survive process restarts. `working` updates and a complete cancellation exchange are not yet implemented.
+Input-required handler waits are in memory and do not survive process restarts. A complete cancellation exchange is not yet implemented.
 
 ## Guided first task
 
