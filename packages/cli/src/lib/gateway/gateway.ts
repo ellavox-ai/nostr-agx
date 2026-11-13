@@ -27,9 +27,9 @@ import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
 import { ApiError, readJson, sendError, sendJson } from "./http.js";
-import { parseIdempotencyKey, TaskOperationStore } from "./idempotency.js";
+import { MAX_BACKGROUND_TASKS_IN_FLIGHT, parseIdempotencyKey, TaskOperationStore } from "./idempotency.js";
 import { verifyGatewayKey } from "./keys.js";
-import { type OperationDeps, parseTaskRequest, readCard, runTaskRequest, sendMessage } from "./operations.js";
+import { type OperationDeps, parseTaskRequest, readCard, runRecoveredTaskRequest, runTaskRequest, sendMessage } from "./operations.js";
 import { Requester } from "./requester.js";
 import { KeyedSlots } from "./slots.js";
 import {
@@ -172,7 +172,19 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			onFailure: (subscription, eventId, detail) =>
 				log(`DROP  delivery of ${eventId.slice(0, 8)} to ${subscription.id} failed: ${detail}`),
 		});
-		const requester = new Requester(transport, options.logger);
+		const requester = new Requester(
+			transport,
+			options.logger,
+			taskOperations,
+			// Stored work was admitted under the limits of an earlier run: restore all
+			// of it even when the limits were lowered since, rather than refuse to start.
+			// New work waits until the in-flight count drops below the current limits.
+			Math.max(
+				(options.maxTaskOperationsInFlight ?? MAX_TASK_REQUESTS_WAITING) +
+					(options.maxBackgroundTasksInFlight ?? MAX_BACKGROUND_TASKS_IN_FLIGHT),
+				taskOperations.list().length,
+			),
+		);
 		const deps: OperationDeps = {
 			npub: identity.npub,
 			publicKey: identity.publicKey,
@@ -542,7 +554,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				try {
 					const body = await readJson(req);
 					const taskRequest = parseTaskRequest(body);
-					const operation = () => runTaskRequest(deps, taskRequest);
+					const operation = (operationId: string) => runTaskRequest(deps, taskRequest, undefined, operationId);
 					if (taskRequest.background) {
 						sendJson(res, 202, taskOperations.submit(bearer(req), idempotencyKey, body, operation));
 						return;
@@ -652,28 +664,36 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			} catch (error) {
 				log(`task outcomes could not be saved: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			requester.stop();
 			// One budget for the whole stop, under the 10 s a container runtime
-			// gives before it kills the process.
+			// gives before it kills the process. It includes the requester's stop,
+			// which waits for a task request still publishing.
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const deadline = new Promise<void>((resolve) => {
 				timer = setTimeout(resolve, SHUTDOWN_WAIT_MS);
 			});
-			await Promise.race([pumpLoop, deadline]);
-			// On disk before waiting for running tasks: a kill from here on loses
-			// nothing (a running task is already recorded as handled).
 			try {
-				persist();
-			} catch (error) {
-				log(`state could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+				// A requester stop that fails must not skip the saves and the lock release below.
+				await Promise.race([requester.stop().catch(() => undefined), deadline]);
+				await Promise.race([pumpLoop, deadline]);
+				// On disk before waiting for running tasks: a kill from here on loses
+				// nothing (a running task is already recorded as handled).
+				try {
+					persist();
+				} catch (error) {
+					log(`state could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				await Promise.race([Promise.all([publishing, client.tasksSettled(), queue.idle()]), deadline]);
+			} finally {
+				clearTimeout(timer);
 			}
-			await Promise.race([Promise.all([publishing, client.tasksSettled(), queue.idle()]), deadline]);
-			clearTimeout(timer);
 			if (queue.pending() > 0) {
 				log(`DROP  ${queue.pending()} message and receipt deliveries not made before stopping (they are in agx inbox)`);
 			}
 			await client.stop().catch(() => undefined);
 		};
+
+		const recovered = await requester.restore();
+		taskOperations.recover(recovered, (operation) => runRecoveredTaskRequest(deps, operation));
 
 		const host = options.host ?? "127.0.0.1";
 		await new Promise<void>((resolve, reject) => {

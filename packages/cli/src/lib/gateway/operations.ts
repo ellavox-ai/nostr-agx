@@ -1,4 +1,6 @@
 import {
+	AgxPendingRequestStoreError,
+	AgxRequestUnknownError,
 	AgxTaskFailedError,
 	type AutoReplyGuard,
 	DEFAULT_AUTO_REPLY_LIMITS,
@@ -18,6 +20,7 @@ import {
 } from "@nostr-agx/nostr";
 import type { NewOutboundMessage } from "../store/types.js";
 import { ApiError, integer, isRecord, text } from "./http.js";
+import type { RecoveredTaskOperation } from "./idempotency.js";
 import type { Requester } from "./requester.js";
 
 /**
@@ -100,10 +103,82 @@ export function parseTaskRequest(input: unknown): TaskRequest {
 	};
 }
 
+async function awaitTaskResult(
+	deps: OperationDeps,
+	req: TaskRequest,
+	result: Promise<unknown>,
+	recovered = false,
+): Promise<Record<string, unknown>> {
+	let output: unknown;
+	try {
+		output = await result;
+	} catch (error) {
+		const message = messageOf(error);
+		// By type or code only: a remote peer's failure is a plain Error carrying the
+		// peer's own text, so matching text would let it pose as a local condition.
+		const code = (error as { code?: unknown } | null)?.code;
+		if (error instanceof AgxRequestUnknownError || code === "result_unknown") {
+			throw new ApiError(
+				409,
+				"result_unknown",
+				"The gateway stopped before this task's outcome was recorded",
+				"The remote agent may have executed the task. Check its effects before submitting new work.",
+			);
+		}
+		if (error instanceof AgxPendingRequestStoreError || code === "pending_request_store_failed") {
+			throw new ApiError(
+				500,
+				"idempotency_store_failed",
+				"The task's pending correlation could not be stored",
+				(error as { mayHavePublished?: unknown }).mayHavePublished === false
+					? "Nothing was sent to the remote agent. Retry with a new key once the gateway can write its task store."
+					: "Do not retry with a different key until you have checked whether the remote agent executed the task.",
+			);
+		}
+		if (message.startsWith("AGX task requires input")) {
+			throw new ApiError(
+				422,
+				"input_required",
+				`${req.npub} requires interactive input to continue this task`,
+				"This gateway task endpoint cannot answer interactive prompts. Use an input-capable AGX client.",
+			);
+		}
+		// The peer's own failure report: an `AgxPublicError` message, or `handler
+		// failed` for an error it kept to itself. Its text never reaches the checks
+		// below, which are for this client's own errors: a peer's "AGX request:
+		// encoded payload exceeds..." would get the retryable 413, free the
+		// idempotency key, and let a retry send the task again. (The input check
+		// above does read peer text, as a peer refuses input it cannot ask for that
+		// way; 422 is not retryable, so the key stays.)
+		if (error instanceof AgxTaskFailedError) {
+			throw new ApiError(502, "task_failed", `${req.npub} reported that the task failed: ${message}`);
+		}
+		if (message.startsWith("AGX request timed out")) {
+			throw new ApiError(
+				504,
+				"timeout",
+				recovered
+					? `No result from ${req.npub} by its original deadline`
+					: `No result from ${req.npub} within ${req.timeoutSec} seconds`,
+				`AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${deps.npub}). Then check that it is running, serves "${req.capability}", and shares a relay with this agent or advertises its relays.`,
+			);
+		}
+		if (message.startsWith("AGX request: encoded payload exceeds")) {
+			throw new ApiError(413, "payload_too_large", message);
+		}
+		if (message.startsWith("AGX request:")) {
+			throw new ApiError(502, "publish_failed", message);
+		}
+		throw new ApiError(502, "task_failed", `${req.npub} reported that the task failed: ${message}`);
+	}
+	return { peer: req.npub, capability: req.capability, status: "completed", output };
+}
+
 export async function runTaskRequest(
 	deps: OperationDeps,
 	req: TaskRequest,
 	signal?: AbortSignal,
+	storageKey?: string,
 ): Promise<Record<string, unknown>> {
 	if (req.checkCard) {
 		const { card, reachable } = await resolvePeerCardWithStatus(req.peer, deps.relays, deps.signer);
@@ -128,46 +203,26 @@ export async function runTaskRequest(
 		}
 	}
 
-	let output: unknown;
-	try {
-		output = await deps.requester.request(req.peer, req.capability, req.payload, req.timeoutSec * 1000, signal);
-	} catch (error) {
-		const message = messageOf(error);
-		if (message.startsWith("AGX task requires input")) {
-			throw new ApiError(
-				422,
-				"input_required",
-				`${req.npub} requires interactive input to continue this task`,
-				"This gateway task endpoint cannot answer interactive prompts. Use an input-capable AGX client.",
-			);
-		}
-		// The peer's own failure report: an `AgxPublicError` message, or `handler
-		// failed` for an error it kept to itself. Its text never reaches the checks
-		// below, which are for this client's own errors: a peer's "AGX request:
-		// encoded payload exceeds..." would get the retryable 413, free the
-		// idempotency key, and let a retry send the task again. (The input check
-		// above does read peer text, as a peer refuses input it cannot ask for that
-		// way; 422 is not retryable, so the key stays.)
-		if (error instanceof AgxTaskFailedError) {
-			throw new ApiError(502, "task_failed", `${req.npub} reported that the task failed: ${message}`);
-		}
-		if (message.startsWith("AGX request timed out")) {
-			throw new ApiError(
-				504,
-				"timeout",
-				`No result from ${req.npub} within ${req.timeoutSec} seconds`,
-				`AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${deps.npub}). Then check that it is running, serves "${req.capability}", and shares a relay with this agent or advertises its relays.`,
-			);
-		}
-		if (message.startsWith("AGX request: encoded payload exceeds")) {
-			throw new ApiError(413, "payload_too_large", message);
-		}
-		if (message.startsWith("AGX request:")) {
-			throw new ApiError(502, "publish_failed", message);
-		}
-		throw new ApiError(502, "task_failed", `${req.npub} reported that the task failed: ${message}`);
-	}
-	return { peer: req.npub, capability: req.capability, status: "completed", output };
+	return awaitTaskResult(
+		deps,
+		req,
+		deps.requester.request(req.peer, req.capability, req.payload, req.timeoutSec * 1000, signal, storageKey),
+	);
+}
+
+export async function runRecoveredTaskRequest(
+	deps: OperationDeps,
+	operation: RecoveredTaskOperation,
+): Promise<Record<string, unknown>> {
+	return awaitTaskResult(deps, {
+		peer: operation.peer,
+		npub: toNpub(operation.peer),
+		capability: operation.capability,
+		payload: {},
+		timeoutSec: 0,
+		checkCard: false,
+		background: true,
+	}, operation.result, true);
 }
 
 /** `POST /v1/messages`: send an encrypted message. */

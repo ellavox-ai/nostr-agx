@@ -121,6 +121,190 @@ describe("TaskOperationStore", () => {
 		restarted.close();
 	});
 
+	it("keeps waiting request correlation across store reconstruction and shutdown", async () => {
+		const store = new TaskOperationStore("test");
+		let release: (() => void) | undefined;
+		store.submit("credential-a", "waiting", {}, async (operationId: string) => {
+			const base = {
+				key: operationId,
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.waiting",
+				deadlineAt: Date.now() + 60_000,
+			};
+			store.save({ ...base, phase: "publishing" });
+			store.save({ ...base, phase: "waiting" });
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { status: "completed" };
+		});
+		store.close();
+
+		const restarted = new TaskOperationStore("test");
+		expect(restarted.list()).toEqual([
+			expect.objectContaining({
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.waiting",
+				phase: "waiting",
+			}),
+		]);
+		restarted.close();
+		const third = new TaskOperationStore("test");
+		expect(third.list()).toEqual([expect.objectContaining({ taskId: "agx-task-1", phase: "waiting" })]);
+		release?.();
+		third.close();
+	});
+
+	it("rejects correlation changes and a waiting-to-publishing regression", async () => {
+		const store = new TaskOperationStore("test");
+		await store.execute("credential-a", "guarded", {}, async (operationId: string) => {
+			const base = {
+				key: operationId,
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.guarded",
+				deadlineAt: Date.now() + 60_000,
+			};
+			store.save({ ...base, phase: "publishing" });
+			for (const changed of [
+				{ taskId: "agx-task-2" },
+				{ peer: "b".repeat(64) },
+				{ capability: "invoice.other" },
+				{ deadlineAt: base.deadlineAt + 1 },
+			]) {
+				expect(() => store.save({ ...base, ...changed, phase: "waiting" })).toThrow(/correlation/i);
+			}
+			store.save({ ...base, phase: "waiting" });
+			expect(() => store.save({ ...base, phase: "publishing" })).toThrow(/phase|publishing/i);
+			return { status: "completed" };
+		});
+		store.close();
+	});
+
+	it("writes a file an older gateway still reads, so it degrades waiting work to result_unknown", async () => {
+		const store = new TaskOperationStore("test");
+		let runs = 0;
+		await store.execute("credential-a", "done", {}, async () => ({ run: ++runs }));
+		const background = store.submit("credential-a", null, {}, async (operationId: string) => {
+			const base = {
+				key: operationId,
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.waiting",
+				deadlineAt: Date.now() + 60_000,
+			};
+			store.save({ ...base, phase: "publishing" });
+			store.save({ ...base, phase: "waiting" });
+			return new Promise<Record<string, unknown>>(() => undefined);
+		});
+		store.close();
+		const path = gatewayTaskOperationsPath("test");
+		const file = JSON.parse(readFileSync(path, "utf8")) as { version: number; operations: Array<Record<string, unknown>> };
+		// Gateways before durable correlation accept only version 1 and quarantine
+		// anything else, which would forget completed keys and run them again.
+		expect(file.version).toBe(1);
+		expect(file.operations.some((operation) => operation.request)).toBe(true);
+
+		// Such a gateway drops the unknown request block when it reads and rewrites the file.
+		for (const operation of file.operations) delete operation.request;
+		writeFileSync(path, JSON.stringify(file));
+		const older = new TaskOperationStore("test");
+		expect(existsSync(`${path}.corrupt`)).toBe(false);
+		expect(older.list()).toEqual([]);
+		await expect(older.execute("credential-a", "done", {}, async () => ({ run: ++runs }))).resolves.toEqual({ run: 1 });
+		expect(runs).toBe(1);
+		expect(older.get("credential-a", background.id as string)).toMatchObject({
+			status: "failed",
+			error: { code: "result_unknown" },
+		});
+		older.close();
+	});
+
+	it("loads stored waiting work over every operation limit without throwing or dropping it", async () => {
+		const store = new TaskOperationStore("test");
+		const keys: string[] = [];
+		for (let index = 0; index < 4; index++) {
+			store.submit("credential-a", `waiting-${index}`, {}, async (operationId: string) => {
+				keys.push(operationId);
+				const base = {
+					key: operationId,
+					taskId: `agx-task-${index}`,
+					peer: "a".repeat(64),
+					capability: "invoice.waiting",
+					deadlineAt: Date.now() + 60_000,
+				};
+				store.save({ ...base, phase: "publishing" });
+				store.save({ ...base, phase: "waiting" });
+				return new Promise<Record<string, unknown>>(() => undefined);
+			});
+		}
+		store.close();
+		// Limits lowered since the work was admitted. Recoverable work is never trimmed,
+		// and restore must not throw: the gateway would then fail on every start.
+		const restarted = new TaskOperationStore("test", {
+			maxOperationsPerCredential: 3,
+			maxOperations: 3,
+			maxInFlight: 1,
+			maxBackgroundInFlight: 1,
+		});
+		expect(restarted.list().map((record) => record.key).sort()).toEqual([...keys].sort());
+		restarted.close();
+	});
+
+	it("refuses to remove waiting correlation once closed, so a restart can still recover it", async () => {
+		const store = new TaskOperationStore("test");
+		let operationKey = "";
+		store.submit("credential-a", "waiting", {}, async (operationId: string) => {
+			operationKey = operationId;
+			const base = {
+				key: operationId,
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.waiting",
+				deadlineAt: Date.now() + 60_000,
+			};
+			store.save({ ...base, phase: "publishing" });
+			store.save({ ...base, phase: "waiting" });
+			return new Promise<Record<string, unknown>>(() => undefined);
+		});
+		store.close();
+		expect(() => store.remove(operationKey)).toThrow(/stopping/);
+		const restarted = new TaskOperationStore("test");
+		expect(restarted.list()).toEqual([expect.objectContaining({ key: operationKey, phase: "waiting" })]);
+		restarted.close();
+	});
+
+	it("rejects correlation the reader would refuse before writing it", async () => {
+		const logs: string[] = [];
+		const store = new TaskOperationStore("test", { log: (line) => logs.push(line) });
+		await store.execute("credential-a", "invalid", {}, async (operationId: string) => {
+			const base = {
+				key: operationId,
+				taskId: "agx-task-1",
+				peer: "a".repeat(64),
+				capability: "invoice.invalid",
+				deadlineAt: Date.now() + 60_000,
+				phase: "publishing" as const,
+			};
+			for (const invalid of [
+				{ peer: "A".repeat(64) },
+				{ capability: "x".repeat(201) },
+				{ taskId: "" },
+				{ deadlineAt: -1 },
+			]) {
+				expect(() => store.save({ ...base, ...invalid })).toThrow(/correlation/i);
+			}
+			return { status: "completed" };
+		});
+		store.close();
+		const restarted = new TaskOperationStore("test", { log: (line) => logs.push(line) });
+		expect(logs).toEqual([]);
+		expect(existsSync(`${gatewayTaskOperationsPath("test")}.corrupt`)).toBe(false);
+		restarted.close();
+	});
+
 	it("retries failures that prove no task was published", async () => {
 		const store = new TaskOperationStore("test");
 		const failures = [

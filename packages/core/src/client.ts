@@ -3,6 +3,13 @@ import { randomId } from "./id";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
 import {
+	AgxPendingRequestStoreError,
+	AgxRequestUnknownError,
+	type PendingRequestRecord,
+	type PendingRequestStore,
+	type RecoveredPendingRequest,
+} from "./pending-request-store";
+import {
 	encodeTaskEnvelope,
 	parseTaskEnvelope,
 	type Task,
@@ -72,6 +79,11 @@ export interface AgxClientOptions {
 	transport: AgxTransport;
 	/** Replay-protection store (default in-memory, bounded). */
 	seen?: SeenStore;
+	/** Optional durable outbound correlation. Call restorePendingRequests() before
+	 * requests, polling, or live delivery when configured. Single writer only. */
+	pendingRequests?: PendingRequestStore;
+	/** Maximum records accepted from pendingRequests during restore (default 256). */
+	maxRestoredRequests?: number;
 	/** Trust hook: return true to let an inbound task run, false to drop it (silently,
 	 * with no reply). A registered capability handler is executable by ANY peer that
 	 * can reach this agent, so authorization is DEFAULT-DENY: omitting this hook drops
@@ -132,8 +144,13 @@ interface Pending {
 	 * if its sender matches — correlation by `taskId` alone is forgeable, since the
 	 * responder legitimately knows the `taskId`. */
 	peer: string;
+	durableKey?: string;
+	deadlineAt?: number | null;
+	timeoutMs?: number;
+	restored?: boolean;
 	published?: boolean;
 	cancelRequested?: boolean;
+	preservePending?: boolean;
 	onUpdate?: (update: TaskResultEnvelope) => void;
 	onError?: (error: Error) => void;
 }
@@ -150,12 +167,15 @@ interface PendingTaskInput {
 interface SendRequestOptions {
 	timeoutMs?: number;
 	taskId?: string;
+	/** Local storage key. Null disables persistence for this request. */
+	storageKey?: string | null;
 	supportsInput?: boolean;
 	onUpdate?: (update: TaskResultEnvelope) => void;
 	onError?: (error: Error) => void;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESTORED_REQUESTS = 256;
 const DEFAULT_MAX_PENDING_TASK_INPUTS = 32;
 const DEFAULT_MAX_INPUT_TIMEOUT_MS = 5 * 60_000;
 const MAX_QUEUED_TASK_RUNS = 100;
@@ -268,6 +288,12 @@ async function releaseTransport(
 export class AgxClient {
 	private readonly transport: AgxTransport;
 	private readonly seen: SeenStore;
+	private readonly pendingRequests?: PendingRequestStore;
+	private readonly maxRestoredRequests: number;
+	private needsRestore: boolean;
+	private restorePromise?: Promise<RecoveredPendingRequest[]>;
+	/** Bumped by every stop(), so a restore that awaited the store can tell. */
+	private stopCount = 0;
 	private readonly authorize?: AgxAuthorize | "accept-all";
 	private readonly log: AgxLogger;
 	/** One-time guard for the no-authorization warning (default-deny in effect). */
@@ -303,6 +329,8 @@ export class AgxClient {
 	private readonly pendingTaskInputs = new Map<string, PendingTaskInput>();
 	private readonly activeInboundTasks = new Map<string, { canceled: boolean }>();
 	private readonly cancellationSends = new Set<Promise<void>>();
+	/** Durable-client request sends, from the first record write to the waiting write. */
+	private readonly requestSends = new Set<Promise<void>>();
 	private cursor: number;
 	private pollTimer?: ReturnType<typeof setTimeout>;
 	private transportRetained = false;
@@ -322,6 +350,15 @@ export class AgxClient {
 	constructor(opts: AgxClientOptions) {
 		this.transport = opts.transport;
 		this.seen = opts.seen ?? new InMemorySeenStore();
+		this.pendingRequests = opts.pendingRequests;
+		this.needsRestore = opts.pendingRequests !== undefined;
+		const maxRestored = Math.floor(
+			opts.maxRestoredRequests ?? DEFAULT_MAX_RESTORED_REQUESTS,
+		);
+		this.maxRestoredRequests =
+			Number.isFinite(maxRestored) && maxRestored > 0
+				? maxRestored
+				: DEFAULT_MAX_RESTORED_REQUESTS;
 		this.authorize = opts.authorize;
 		this.log = opts.logger ?? noopLogger;
 		this.identity = opts.identity;
@@ -405,7 +442,7 @@ export class AgxClient {
 		peer: string,
 		capability: string,
 		payload: unknown,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; storageKey?: string | null },
 	): Promise<Output> {
 		const { result } = await this.sendRequest<Output>(
 			peer,
@@ -463,12 +500,224 @@ export class AgxClient {
 		return stream;
 	}
 
-	private async sendRequest<Output = unknown>(
+	private assertRestored(): void {
+		if (this.needsRestore) {
+			throw new Error(
+				"AGX durable requests must be restored before requests, polling, or live delivery",
+			);
+		}
+	}
+
+	private registerPending(options: {
+		taskId: string;
+		peer: string;
+		deadlineAt: number | null;
+		durableKey?: string;
+		timeoutMs?: number;
+		restored?: boolean;
+		published?: boolean;
+		onUpdate?: (update: TaskResultEnvelope) => void;
+		onError?: (error: Error) => void;
+	}): { pending: Pending; result: Promise<unknown> } {
+		let pending!: Pending;
+		const result = new Promise<unknown>((resolve, reject) => {
+			pending = {
+				resolve,
+				reject,
+				peer: options.peer,
+				durableKey: options.durableKey,
+				deadlineAt: options.deadlineAt,
+				timeoutMs: options.timeoutMs,
+				restored: options.restored,
+				published: options.published,
+				onUpdate: options.onUpdate,
+				onError: options.onError,
+			};
+			this.armDeadline(options.taskId, pending);
+			this.pending.set(options.taskId, pending);
+		});
+		result.catch(() => undefined);
+		return { pending, result };
+	}
+
+	private armDeadline(taskId: string, pending: Pending): void {
+		if (pending.deadlineAt === null || pending.deadlineAt === undefined) return;
+		pending.timer = setTimeout(
+			() => void this.expirePending(taskId, pending),
+			Math.max(0, pending.deadlineAt - Date.now()),
+		);
+	}
+
+	private async expirePending(taskId: string, pending: Pending): Promise<void> {
+		if (this.pending.get(taskId) !== pending) return;
+		this.pending.delete(taskId);
+		if (pending.timer) clearTimeout(pending.timer);
+		const error = new Error(
+			pending.restored
+				? "AGX request timed out after its original deadline"
+				: `AGX request timed out after ${pending.timeoutMs}ms`,
+		);
+		pending.reject(error);
+		pending.onError?.(error);
+		pending.cancelRequested = true;
+		if (pending.durableKey && this.pendingRequests) {
+			try {
+				await this.pendingRequests.remove(pending.durableKey);
+			} catch (storeError) {
+				this.log.error?.("AGX: could not remove expired durable request", {
+					taskId,
+					error: String(storeError),
+				});
+			}
+		}
+		if (pending.published) {
+			void this.sendTaskCancel(pending.peer, taskId);
+		}
+	}
+
+	private rejectedRecovery(error: Error): Promise<unknown> {
+		const result = Promise.reject(error);
+		result.catch(() => undefined);
+		return result;
+	}
+
+	private validateRestoredRecord(record: unknown): asserts record is PendingRequestRecord {
+		if (!record || typeof record !== "object") {
+			throw new Error("AGX durable request record is invalid");
+		}
+		const candidate = record as Partial<PendingRequestRecord>;
+		const boundedString = (value: unknown, max: number) =>
+			typeof value === "string" && value.length > 0 && value.length <= max;
+		if (
+			!boundedString(candidate.key, 200) ||
+			!boundedString(candidate.taskId, 200) ||
+			!boundedString(candidate.peer, 256) ||
+			!boundedString(candidate.capability, 200) ||
+			(candidate.phase !== "publishing" && candidate.phase !== "waiting") ||
+			(candidate.deadlineAt !== null &&
+				(!Number.isSafeInteger(candidate.deadlineAt) || (candidate.deadlineAt as number) < 0))
+		) {
+			throw new Error("AGX durable request record is invalid");
+		}
+	}
+
+	/** Re-register stored waiting requests without publishing them again. Concurrent
+	 * calls share one restore and later calls return []: attach the returned handles
+	 * exactly once. A stop() during the restore rejects it with nothing registered. */
+	async restorePendingRequests(): Promise<RecoveredPendingRequest[]> {
+		if (!this.pendingRequests) {
+			this.needsRestore = false;
+			return [];
+		}
+		if (!this.needsRestore) return [];
+		if (this.restorePromise) return this.restorePromise;
+		const operation = this.restorePendingRequestsOnce();
+		this.restorePromise = operation;
+		try {
+			const recovered = await operation;
+			this.needsRestore = false;
+			return recovered;
+		} finally {
+			if (this.restorePromise === operation) this.restorePromise = undefined;
+		}
+	}
+
+	private async restorePendingRequestsOnce(): Promise<RecoveredPendingRequest[]> {
+		const store = this.pendingRequests;
+		if (!store) return [];
+		const restored: Pending[] = [];
+		const stopCount = this.stopCount;
+		const assertNotStopped = () => {
+			if (this.stopCount !== stopCount) throw new Error("AGX client stopped");
+		};
+		try {
+			const records: unknown = await store.list();
+			assertNotStopped();
+			if (!Array.isArray(records) || records.length > this.maxRestoredRequests) {
+				throw new Error("AGX durable request restore limit exceeded or store returned invalid data");
+			}
+			const keys = new Set<string>();
+			const taskIds = new Set<string>();
+			for (const record of records) {
+				this.validateRestoredRecord(record);
+				if (keys.has(record.key) || taskIds.has(record.taskId) || this.pending.has(record.taskId)) {
+					throw new Error("AGX durable request record has a duplicate key or task ID");
+				}
+				keys.add(record.key);
+				taskIds.add(record.taskId);
+			}
+
+			const recovered: RecoveredPendingRequest[] = [];
+			for (const record of records as PendingRequestRecord[]) {
+				if (record.phase === "publishing") {
+					await store.remove(record.key);
+					assertNotStopped();
+					recovered.push({
+						key: record.key,
+						taskId: record.taskId,
+						result: this.rejectedRecovery(new AgxRequestUnknownError()),
+					});
+					continue;
+				}
+				if (record.deadlineAt !== null && record.deadlineAt <= Date.now()) {
+					await store.remove(record.key);
+					assertNotStopped();
+					recovered.push({
+						key: record.key,
+						taskId: record.taskId,
+						result: this.rejectedRecovery(
+							new Error("AGX request timed out after its original deadline"),
+						),
+					});
+					void this.sendTaskCancel(record.peer, record.taskId);
+					continue;
+				}
+				const { pending, result } = this.registerPending({
+					taskId: record.taskId,
+					peer: record.peer,
+					deadlineAt: record.deadlineAt,
+					durableKey: record.key,
+					restored: true,
+					published: true,
+				});
+				restored.push(pending);
+				recovered.push({ key: record.key, taskId: record.taskId, result });
+			}
+			return recovered;
+		} catch (error) {
+			for (const pending of restored) {
+				if (pending.timer) clearTimeout(pending.timer);
+				for (const [taskId, candidate] of this.pending) {
+					if (candidate === pending) this.pending.delete(taskId);
+				}
+				pending.reject(error instanceof Error ? error : new Error(String(error)));
+			}
+			throw error;
+		}
+	}
+
+	private sendRequest<Output = unknown>(
 		peer: string,
 		capability: string,
 		payload: unknown,
 		opts?: SendRequestOptions,
 	): Promise<{ taskId: string; result: Promise<Output> }> {
+		const sending = this.publishRequest<Output>(peer, capability, payload, opts);
+		if (this.pendingRequests) {
+			const done = sending.then(() => undefined, () => undefined);
+			this.requestSends.add(done);
+			void done.finally(() => this.requestSends.delete(done));
+		}
+		return sending;
+	}
+
+	private async publishRequest<Output = unknown>(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		opts?: SendRequestOptions,
+	): Promise<{ taskId: string; result: Promise<Output> }> {
+		this.assertRestored();
 		const taskId = opts?.taskId ?? randomId();
 		const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
 		const envelope: TaskRequestEnvelope = {
@@ -480,48 +729,49 @@ export class AgxClient {
 			timeoutMs: timeoutMs > 0 ? timeoutMs : 0,
 		};
 		const text = encodeTaskEnvelope(envelope);
-		// Fail fast (before registering the pending) rather than silently truncate
-		// the envelope into unparseable JSON — which the peer drops, leaving the
-		// caller to hit a generic timeout for what is really a caller error.
 		if (!this.fitsWire(text)) {
 			throw new Error(
 				`AGX request: encoded payload exceeds the transport size limit (over ${MAX_BODY} chars, or too large once serialized + encrypted)`,
 			);
 		}
-		// Register the pending entry SYNCHRONOUSLY (before the await), so a stop()
-		// or a publish failure while the send is in flight still settles the caller
-		// instead of leaving it hanging.
-		let pending!: Pending;
-		const result = new Promise<Output>((resolve, reject) => {
-			pending = {
-				resolve: resolve as (o: unknown) => void,
-				reject,
-				peer: this.normalizeId(peer),
-				onUpdate: opts?.onUpdate,
-				onError: opts?.onError,
-			};
-			if (timeoutMs > 0) {
-				pending.timer = setTimeout(() => {
-					if (this.pending.get(taskId) !== pending) return;
-					this.pending.delete(taskId);
-					const error = new Error(
-						`AGX request timed out after ${timeoutMs}ms`,
-					);
-					pending.reject(error);
-					pending.onError?.(error);
-					pending.cancelRequested = true;
-					if (pending.published) {
-						void this.sendTaskCancel(pending.peer, taskId);
-					}
-				}, timeoutMs);
-			}
-			this.pending.set(taskId, pending);
+		const durableKey =
+			this.pendingRequests && opts?.supportsInput !== true && opts?.storageKey !== null
+				? opts?.storageKey ?? taskId
+				: undefined;
+		const deadlineAt = timeoutMs > 0 ? Date.now() + timeoutMs : null;
+		const { pending, result: rawResult } = this.registerPending({
+			taskId,
+			peer: this.normalizeId(peer),
+			deadlineAt,
+			durableKey,
+			timeoutMs,
+			onUpdate: opts?.onUpdate,
+			onError: opts?.onError,
 		});
-		// The timeout or a stop() can settle it while the publish below is still
-		// in flight, before the caller holds it: handled here, it is not an
-		// unhandled rejection (which would end the process). The caller still
-		// gets the rejection from `return result`.
-		result.catch(() => undefined);
+		const result = rawResult as Promise<Output>;
+		const record = (phase: PendingRequestRecord["phase"]): PendingRequestRecord => ({
+			key: durableKey ?? taskId,
+			taskId,
+			peer: pending.peer,
+			capability,
+			deadlineAt,
+			phase,
+		});
+
+		if (durableKey && this.pendingRequests) {
+			try {
+				await this.pendingRequests.save(record("publishing"));
+			} catch {
+				await this.settlePending(taskId, new AgxPendingRequestStoreError({ mayHavePublished: false }));
+				return { taskId, result };
+			}
+			if (this.pending.get(taskId) !== pending) {
+				if (!pending.preservePending) {
+					await Promise.resolve(this.pendingRequests.remove(durableKey)).catch(() => undefined);
+				}
+				return { taskId, result };
+			}
+		}
 
 		const sent = await this.transport
 			.publishMessage(peer, {
@@ -531,17 +781,29 @@ export class AgxClient {
 			})
 			.catch(() => ({ ok: false, eventId: "", contextId: taskId }));
 		if (!sent.ok) {
-			this.settlePending(
-				taskId,
-				new Error(`AGX request: publish failed to ${peer}`),
-			);
-		} else {
-			pending.published = true;
-			if (pending.cancelRequested) {
-				void this.sendTaskCancel(pending.peer, taskId);
-			}
+			await this.settlePending(taskId, new Error(`AGX request: publish failed to ${peer}`));
+			return { taskId, result };
 		}
 
+		pending.published = true;
+		// A result, the deadline or an ordinary stop() may have settled the request
+		// during the publish and removed its record: do not write it back. A restart
+		// stop keeps it, so the next process can still collect the result.
+		if (durableKey && this.pendingRequests && (this.pending.get(taskId) === pending || pending.preservePending)) {
+			try {
+				await this.pendingRequests.save(record("waiting"));
+			} catch {
+				void this.sendTaskCancel(pending.peer, taskId);
+				await this.settlePending(taskId, new AgxPendingRequestStoreError());
+				return { taskId, result };
+			}
+			if (this.pending.get(taskId) !== pending && !pending.preservePending) {
+				await Promise.resolve(this.pendingRequests.remove(durableKey)).catch(() => undefined);
+			}
+		}
+		if (pending.cancelRequested) {
+			void this.sendTaskCancel(pending.peer, taskId);
+		}
 		return { taskId, result };
 	}
 
@@ -555,6 +817,7 @@ export class AgxClient {
 		dispatched: number;
 		complete: boolean;
 	}> {
+		this.assertRestored();
 		// Re-entrancy guard: overlapping pumps would both see `has(id) === false`
 		// (add happens only after dispatch) and double-run the same handler. A
 		// concurrent pump is a no-op — reported as incomplete so a host driving
@@ -875,6 +1138,7 @@ export class AgxClient {
 		 * Defaults to true. */
 		liveDispatch?: boolean;
 	}): Promise<void> {
+		this.assertRestored();
 		if (this.started) {
 			return;
 		}
@@ -950,10 +1214,12 @@ export class AgxClient {
 	}
 
 	/** Stop polling and this client's live listener. In-flight `request()` callers
-	 * are rejected (their result can no longer arrive) rather than left hanging. */
-	async stop(): Promise<void> {
+	 * are rejected rather than left hanging. `preservePending` is for a planned
+	 * durable-request restart: waiting records stay and no task cancel is sent. */
+	async stop(opts?: { preservePending?: boolean }): Promise<void> {
 		this.running = false;
 		this.stopping = true;
+		this.stopCount += 1;
 		for (const queued of this.queuedTaskRuns.splice(0)) {
 			queued.cancel();
 		}
@@ -981,12 +1247,23 @@ export class AgxClient {
 			if (p.timer) {
 				clearTimeout(p.timer);
 			}
+			p.preservePending = opts?.preservePending === true && p.durableKey !== undefined;
 			const error = new Error("AGX client stopped");
 			p.reject(error);
 			p.onError?.(error);
-			p.cancelRequested = true;
-			if (p.published) {
+			p.cancelRequested = !p.preservePending;
+			if (!p.preservePending && p.published) {
 				void this.sendTaskCancel(p.peer, taskId);
+			}
+			if (!p.preservePending && p.durableKey && this.pendingRequests) {
+				try {
+					await this.pendingRequests.remove(p.durableKey);
+				} catch (storeError) {
+					this.log.error?.("AGX: could not remove stopped durable request", {
+						taskId,
+						error: String(storeError),
+					});
+				}
 			}
 		}
 		this.pending.clear();
@@ -997,6 +1274,12 @@ export class AgxClient {
 			p.reject(new Error("AGX client stopped"));
 		}
 		this.pendingTaskInputs.clear();
+		// A restart stop returns only once each in-flight send has written its record:
+		// a next client on the same store would otherwise see it mid-publish, and the
+		// late waiting write would leave an orphan record behind.
+		while (opts?.preservePending === true && this.requestSends.size > 0) {
+			await Promise.all([...this.requestSends]);
+		}
 		while (this.cancellationSends.size > 0) {
 			await Promise.all([...this.cancellationSends]);
 		}
@@ -1534,16 +1817,31 @@ export class AgxClient {
 			return;
 		}
 
-		p.onUpdate?.(env);
 		if (env.status === "input-required") {
+			p.onUpdate?.(env);
 			if (!p.onUpdate) {
 				await this.sendTaskCancel(p.peer, env.taskId);
-				this.settlePending(env.taskId, new Error(INPUT_UNSUPPORTED_ERROR));
+				await this.settlePending(env.taskId, new Error(INPUT_UNSUPPORTED_ERROR));
 				return;
 			}
 			return; // don't delete or settle the task
 		}
 
+		if (p.durableKey && this.pendingRequests) {
+			// The genuine result is here: its deadline must not race the removal.
+			if (p.timer) clearTimeout(p.timer);
+			try {
+				await this.pendingRequests.remove(p.durableKey);
+			} catch (error) {
+				// Keep the in-memory entry, its deadline and the cursor retryable. The
+				// result must not settle locally while a restart could recover it again.
+				if (this.pending.get(env.taskId) === p) this.armDeadline(env.taskId, p);
+				throw error;
+			}
+			// A stop() settled it while the record was being removed.
+			if (this.pending.get(env.taskId) !== p) return;
+		}
+		p.onUpdate?.(env);
 		this.pending.delete(env.taskId);
 		if (p.timer) {
 			clearTimeout(p.timer);
@@ -1725,18 +2023,26 @@ export class AgxClient {
 		}
 	}
 
-	/** Reject + remove a pending request (publish failure / shutdown). */
-	private settlePending(taskId: string, error: Error): void {
+	/** Reject + remove a pending request after a publish or storage failure. */
+	private async settlePending(taskId: string, error: Error): Promise<void> {
 		const p = this.pending.get(taskId);
 		if (!p) {
 			return;
+		}
+		let settledError = error;
+		if (p.durableKey && this.pendingRequests) {
+			try {
+				await this.pendingRequests.remove(p.durableKey);
+			} catch {
+				settledError = error instanceof AgxPendingRequestStoreError ? error : new AgxPendingRequestStoreError();
+			}
 		}
 		this.pending.delete(taskId);
 		if (p.timer) {
 			clearTimeout(p.timer);
 		}
-		p.reject(error);
-		p.onError?.(error);
+		p.reject(settledError);
+		p.onError?.(settledError);
 	}
 
 	private async startMessageListener(): Promise<void> {
