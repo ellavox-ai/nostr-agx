@@ -1,9 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import { updateProfile } from "../lib/config.js";
 import { setCredential } from "../lib/credentials.js";
 import { savePendingLogin } from "../lib/device-flow.js";
+import { createIdentity, saveIdentity } from "../lib/identity.js";
+import { credentialsPath, identityPath, pendingLoginLockPath, pendingLoginPath } from "../lib/paths.js";
+import { type RunningRelay, startRelay } from "../relay/server.js";
 import { agx, fakeClock, jsonDocuments, sandbox, useClock } from "../test/helpers.js";
 import { type MockIndexServer, startMockIndexServer } from "../test/mock-index-server.js";
 
@@ -160,5 +164,218 @@ describe("agx doctor", () => {
 		const { checks } = await doctor();
 		expect(check(checks, "api credentials")).toMatchObject({ verdict: "fail" });
 		expect(check(checks, "api credentials")?.remediation).toMatch(/agx login/);
+	});
+});
+
+/** What `--local` leaves out, named as the full doctor names its checks. */
+const LOCAL_SKIPPED = [
+	"index",
+	"api credentials",
+	"credential source",
+	"login expiry",
+	"pending login",
+	"login lock",
+	"state files",
+	"listing",
+	"nip-05",
+];
+
+describe("agx doctor --local", () => {
+	let relay: RunningRelay;
+	let relayUrl: string;
+	let secretKeyHex: string;
+	let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+	const hostedCalls: string[] = [];
+
+	/** The hosted index must never be contacted: every fetch fails the test loudly. */
+	function forbidFetch(): void {
+		fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+			hostedCalls.push(String(input));
+			throw new Error("the hosted index was contacted under --local");
+		});
+	}
+
+	function allowFetch(): void {
+		fetchSpy?.mockRestore();
+		fetchSpy = undefined;
+	}
+
+	beforeEach(async () => {
+		hostedCalls.length = 0;
+		relay = await startRelay({ port: 0 });
+		relayUrl = `ws://127.0.0.1:${relay.port}`;
+		const identity = createIdentity();
+		secretKeyHex = identity.secretKeyHex;
+		saveIdentity("default", identity);
+		updateProfile("default", { relays: [relayUrl], allow: [createIdentity().publicKey] });
+	});
+
+	afterEach(async () => {
+		allowFetch();
+		await relay.close();
+	});
+
+	async function local(...extra: string[]) {
+		const run = await agx("doctor", "--local", "--json", ...extra);
+		const doc = jsonDocuments(run.stdout)[0] as { checks?: Check[]; skipped?: string[] } | undefined;
+		return { run, code: run.code, checks: doc?.checks ?? [], skipped: doc?.skipped };
+	}
+
+	it("passes with an identity, a loopback relay and an allowlist, and never contacts the hosted index", async () => {
+		forbidFetch();
+		const { run, code, checks } = await local();
+		expect(run.stderr).toBe("");
+		expect(code).toBe(0);
+		expect(checks.map((c) => `${c.verdict} ${c.name}`)).toEqual([
+			"pass file permissions",
+			"pass identity",
+			`pass relay ${relayUrl}`,
+			"pass allowlist",
+		]);
+		// Two independent observers: the fetch double, and the mock index's own log.
+		expect(hostedCalls).toEqual([]);
+		expect(mock.requests).toEqual([]);
+		expect(`${run.stdout}${run.stderr}`).not.toContain(secretKeyHex);
+	});
+
+	it("passes when the hosted index is unreachable and no login was ever made", async () => {
+		forbidFetch();
+		updateProfile("default", { apiBaseUrl: "http://127.0.0.1:1" });
+		const { code, checks } = await local();
+		expect(code).toBe(0);
+		expect(checks.map((c) => c.name)).not.toContain("index");
+		expect(hostedCalls).toEqual([]);
+	});
+
+	it("does not read the API credential file, nor use AGX_API_KEY", async () => {
+		writeFileSync(credentialsPath(), "{ not json", { mode: 0o600 });
+		writeFileSync(pendingLoginPath("default"), "{ not json", { mode: 0o600 });
+		process.env.AGX_API_KEY = "ela_SENTINELSENTINEL";
+		// The control: the full doctor does read it, and fails on it.
+		const full = await doctor();
+		expect(full.code).toBe(3);
+		expect(check(full.checks, "api credentials")).toMatchObject({ verdict: "fail" });
+
+		forbidFetch();
+		const { run, code, checks } = await local();
+		expect(code).toBe(0);
+		expect(checks.map((c) => c.name)).not.toContain("api credentials");
+		expect(`${run.stdout}${run.stderr}`).not.toContain("SENTINEL");
+		expect(hostedCalls).toEqual([]);
+	});
+
+	it("prints each skipped check by name and the command for a full diagnosis", async () => {
+		const run = await agx("doctor", "--local");
+		expect(run.code).toBe(0);
+		expect(run.stdout).toContain("agx doctor --local");
+		for (const name of LOCAL_SKIPPED) {
+			expect(run.stdout, name).toMatch(new RegExp(`^\\s+${name}$`, "m"));
+		}
+		expect(run.stdout).toMatch(/^\s+agx doctor$/m);
+	});
+
+	it("--json adds `skipped`; the full doctor's JSON keeps exactly its old shape", async () => {
+		const { skipped } = await local();
+		expect(skipped).toEqual(LOCAL_SKIPPED);
+		const full = await agx("doctor", "--json");
+		expect(Object.keys(jsonDocuments(full.stdout)[0] as object)).toEqual(["checks"]);
+	});
+
+	it("fails with exit 3 when the relay is down, and still names the relay", async () => {
+		const gone = await startRelay({ port: 0 });
+		const goneUrl = `ws://127.0.0.1:${gone.port}`;
+		await gone.close();
+		updateProfile("default", { relays: [goneUrl] });
+		forbidFetch();
+		const { code, checks } = await local();
+		expect(code).toBe(3);
+		expect(check(checks, `relay ${goneUrl}`)).toMatchObject({ verdict: "fail", detail: "unreachable" });
+		expect(check(checks, `relay ${goneUrl}`)?.remediation).toMatch(/agx relay/);
+		expect(hostedCalls).toEqual([]);
+	});
+
+	it("fails with exit 3 when no relay is configured, instead of passing with nothing probed", async () => {
+		updateProfile("default", { relays: [] });
+		const { code, checks } = await local();
+		expect(code).toBe(3);
+		expect(check(checks, "relays")).toMatchObject({ verdict: "fail" });
+		expect(check(checks, "relays")?.remediation).toMatch(/agx config set relays/);
+	});
+
+	it("fails with exit 3 when the profile has no identity, and still checks the relay", async () => {
+		const { rmSync } = await import("node:fs");
+		rmSync(identityPath("default"));
+		const { code, checks } = await local();
+		expect(code).toBe(3);
+		expect(check(checks, "identity")).toMatchObject({ verdict: "fail", remediation: "agx identity new" });
+		expect(check(checks, `relay ${relayUrl}`)).toMatchObject({ verdict: "pass" });
+	});
+
+	it("reports a relay that needs NIP-42 AUTH exactly as the full doctor does", async () => {
+		const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+		await new Promise((resolve) => wss.once("listening", resolve));
+		wss.on("connection", (socket) => {
+			socket.on("message", (raw) => {
+				const msg = JSON.parse(raw.toString());
+				if (msg[0] === "REQ") {
+					socket.send(JSON.stringify(["CLOSED", msg[1], "auth-required: sign in first"]));
+				}
+			});
+		});
+		try {
+			const url = `ws://127.0.0.1:${(wss.address() as { port: number }).port}`;
+			updateProfile("default", { relays: [url] });
+			const full = await doctor();
+			const { code, checks } = await local();
+			expect(code).toBe(0);
+			expect(check(checks, `relay ${url}`)).toMatchObject({ verdict: "warn" });
+			expect(check(checks, `relay ${url}`)?.detail).toMatch(/NIP-42/);
+			expect(check(checks, `relay ${url}`)).toEqual(check(full.checks, `relay ${url}`));
+		} finally {
+			await new Promise((resolve) => wss.close(resolve));
+		}
+	});
+
+	it("fails with exit 3 on a loose secret file, and --fix-perms repairs it; a stale login lock is left alone", async () => {
+		chmodSync(identityPath("default"), 0o644);
+		writeFileSync(credentialsPath(), "{}", { mode: 0o644 });
+		const lock = pendingLoginLockPath("default");
+		mkdirSync(dirname(lock), { recursive: true });
+		writeFileSync(lock, JSON.stringify({ pid: process.pid, at: new Date(clock.now()).toISOString() }));
+		expect(check((await doctor()).checks, "login lock")).toMatchObject({ verdict: "warn" });
+
+		const broken = await local();
+		expect(broken.code).toBe(3);
+		const perms = check(broken.checks, "file permissions");
+		expect(perms?.verdict).toBe("fail");
+		expect(perms?.detail).toContain("identity.json");
+		expect(perms?.detail).toContain("credentials.json");
+
+		const fixed = await local("--fix-perms");
+		expect(fixed.code).toBe(0);
+		expect(check(fixed.checks, "file permissions")?.verdict).toBe("pass");
+		expect(statSync(identityPath("default")).mode & 0o077).toBe(0);
+		// Removing an abandoned login lock is a hosted-login repair: --local does not do it.
+		expect(existsSync(lock)).toBe(true);
+	});
+
+	it("fails with exit 3 on an allowlist entry that is not a pubkey, and never prints the entry", async () => {
+		const pasted = `nsec1${"q".repeat(58)}`;
+		updateProfile("default", { allow: [createIdentity().publicKey, pasted] });
+		const { run, code, checks } = await local();
+		expect(code).toBe(3);
+		expect(check(checks, "allowlist")).toMatchObject({ verdict: "fail" });
+		expect(check(checks, "allowlist")?.detail).toMatch(/#2/);
+		const human = await agx("doctor", "--local");
+		expect(human.code).toBe(3);
+		expect(`${run.stdout}${run.stderr}${human.stdout}${human.stderr}`).not.toContain(pasted);
+	});
+
+	it("warns, but passes, on an empty allowlist: default-deny is a posture, not a fault", async () => {
+		updateProfile("default", { allow: [] });
+		const { code, checks } = await local();
+		expect(code).toBe(0);
+		expect(check(checks, "allowlist")).toMatchObject({ verdict: "warn" });
+		expect(check(checks, "allowlist")?.remediation).toMatch(/agx identity allow/);
 	});
 });

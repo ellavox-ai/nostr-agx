@@ -692,6 +692,10 @@ export function buildProgram(): Command {
 			"--fix-perms",
 			"repair file permissions under ~/.agx, and remove an abandoned login lock",
 		)
+		.option(
+			"--local",
+			"check only what a local exchange needs (permissions, identity, relays, allowlist); skip the hosted index and login",
+		)
 		.action((options) => doctorCommand(withGlobals(options)));
 
 	return program;

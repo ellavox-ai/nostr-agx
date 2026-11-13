@@ -1,5 +1,5 @@
 import { chmodSync, existsSync } from "node:fs";
-import { GIFT_WRAP_KIND } from "@nostr-agx/nostr";
+import { GIFT_WRAP_KIND, normalizePubkey } from "@nostr-agx/nostr";
 import kleur from "kleur";
 import WebSocket from "ws";
 import { createApiClient, toCliError } from "../lib/api.js";
@@ -39,6 +39,8 @@ const EXPIRY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 export interface DoctorOptions {
 	profile?: string;
 	fixPerms?: boolean;
+	/** Check only what a local exchange needs; skip the hosted index and login. */
+	local?: boolean;
 }
 
 type Verdict = "pass" | "warn" | "fail";
@@ -77,6 +79,81 @@ function render(check: Check): void {
 			say(kleur.dim(`      → ${line}`));
 		}
 	}
+}
+
+/** What `--local` does not run, named as the full doctor names its checks. */
+const LOCAL_SKIPPED = [
+	"index",
+	"api credentials",
+	"credential source",
+	"login expiry",
+	"pending login",
+	"login lock",
+	"state files",
+	"listing",
+	"nip-05",
+];
+
+/**
+ * The allowlist as `serve` and `inbox` read it: every entry must be an npub or a
+ * hex pubkey, or they refuse to start. A bad entry is named by its position
+ * only, never printed: it may be a secret pasted into the wrong command.
+ */
+function allowlistCheck(allow: string[]): Check {
+	const bad = allow.flatMap((entry, i) =>
+		normalizePubkey(entry) === null ? [`#${i + 1}`] : [],
+	);
+	if (bad.length > 0) {
+		return {
+			name: "allowlist",
+			verdict: "fail",
+			detail: `${bad.length === 1 ? "entry" : "entries"} ${bad.join(", ")} of "allow" ${bad.length === 1 ? "is" : "are"} not an npub or a hex pubkey, so serve and inbox will not start`,
+			remediation: `Remove ${bad.length === 1 ? "it" : "them"} from "allow" in ${configPath()}, then re-run:\n    agx doctor --local`,
+		};
+	}
+	if (allow.length === 0) {
+		return {
+			name: "allowlist",
+			verdict: "warn",
+			detail:
+				"empty: default-deny, so task requests are refused and messages from anyone are held",
+			remediation: "agx identity allow <npub>",
+		};
+	}
+	return {
+		name: "allowlist",
+		verdict: "pass",
+		detail: `${allow.length} peer(s) allowed; everyone else is denied or held`,
+	};
+}
+
+/** Print the report, then fail with exit 3 if any check failed. */
+function report(checks: Check[], local: boolean): void {
+	heading(local ? "agx doctor --local" : "agx doctor");
+	for (const check of checks) {
+		render(check);
+	}
+	json(local ? { checks, skipped: LOCAL_SKIPPED } : { checks });
+	if (local) {
+		say("");
+		say(kleur.dim("Skipped by --local, not run:"));
+		for (const name of LOCAL_SKIPPED) {
+			say(kleur.dim(`  ${name}`));
+		}
+		say(kleur.dim("For the full hosted-workflow diagnosis, run:"));
+		say(kleur.dim("  agx doctor"));
+	}
+
+	const failed = checks.filter((c) => c.verdict === "fail");
+	say("");
+	if (failed.length === 0) {
+		say(kleur.green(`${checks.length} check(s) passed.`));
+		return;
+	}
+	throw new AgxCliError(
+		`${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
+		{ exitCode: EXIT.config },
+	);
 }
 
 async function probeHttp(
@@ -321,6 +398,24 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
 		});
 	}
 
+	// `--local` stops after the relays, with one check of its own. Everything
+	// below needs the hosted index or a login: none of it runs, and the report
+	// names what was skipped.
+	if (options.local) {
+		if (profile.relays.length === 0) {
+			checks.push({
+				name: "relays",
+				verdict: "fail",
+				detail: "no relay is configured, so nothing can be sent or received",
+				remediation:
+					"agx config set relays ws://127.0.0.1:7447\n(and run: agx relay)",
+			});
+		}
+		checks.push(allowlistCheck(profile.allow));
+		report(checks, true);
+		return;
+	}
+
 	// 4. The index API. Probing `/api/docs` rather than `/api/rpc`: the RPC mount
 	// matches on "/rpc/" WITH a trailing slash, so a bare path never matches and
 	// would look like an outage.
@@ -536,20 +631,5 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
 		}
 	}
 
-	heading("agx doctor");
-	for (const check of checks) {
-		render(check);
-	}
-	json({ checks });
-
-	const failed = checks.filter((c) => c.verdict === "fail");
-	say("");
-	if (failed.length === 0) {
-		say(kleur.green(`${checks.length} check(s) passed.`));
-		return;
-	}
-	throw new AgxCliError(
-		`${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}`,
-		{ exitCode: EXIT.config },
-	);
+	report(checks, false);
 }
