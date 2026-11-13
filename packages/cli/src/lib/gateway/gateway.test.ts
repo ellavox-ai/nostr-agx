@@ -1,20 +1,21 @@
 import { createHmac } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { AgxClient, AgxPublicError, DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
+import { AgxClient, AgxPublicError, DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE } from "@nostr-agx/core";
 import { generateKeypair, localSigner, NostrTransport, toNpub } from "@nostr-agx/nostr";
 import WebSocket from "ws";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type RunningRelay, startRelay } from "../../relay/server.js";
 import { agx, sandbox } from "../../test/helpers.js";
 import { resolveProfileName } from "../config.js";
 import { loadIdentity } from "../identity.js";
-import { profileDir, seenPath } from "../paths.js";
+import { gatewayTaskOperationsPath, profileDir, seenPath } from "../paths.js";
 import { MESSAGES_FILE } from "../store/message-store.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import { type RunningGateway, startGateway } from "./gateway.js";
+import { TaskOperationStore } from "./idempotency.js";
 import { createGatewayKey } from "./keys.js";
 
 /**
@@ -569,7 +570,7 @@ describe("agx gateway: outbound", () => {
 		}
 	}, 30_000);
 
-	it("restores completed idempotent results and reports unresolved work after restart", async () => {
+	it("restores completed and pending idempotent results after restart", async () => {
 		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 4 });
 		let completedRuns = 0;
 		reviewer.client.handle("invoice.saved", () => ({ run: ++completedRuns }));
@@ -598,7 +599,7 @@ describe("agx gateway: outbound", () => {
 			});
 			return { run: pendingRuns };
 		});
-		const pendingBody = JSON.stringify({ peer: reviewer.npub, capability: "invoice.unknown", timeoutSec: 1 });
+		const pendingBody = JSON.stringify({ peer: reviewer.npub, capability: "invoice.unknown", timeoutSec: 20 });
 		const pending = api("/v1/tasks", {
 			method: "POST",
 			headers: { "idempotency-key": "restart-pending" },
@@ -609,22 +610,55 @@ describe("agx gateway: outbound", () => {
 		await gateway.close();
 		await expect(pending).rejects.toThrow();
 		gateway = await startGateway(gatewayOptions());
-		const unknown = await api("/v1/tasks", {
+		const retry = api("/v1/tasks", {
 			method: "POST",
 			headers: { "idempotency-key": "restart-pending" },
 			body: pendingBody,
 		});
-		expect(unknown.status).toBe(409);
-		expect(await json(unknown)).toMatchObject({ error: { code: "result_unknown" } });
 		release();
-		await new Promise((resolve) => setTimeout(resolve, 1200));
-		const stillUnknown = await api("/v1/tasks", {
-			method: "POST",
-			headers: { "idempotency-key": "restart-pending" },
-			body: pendingBody,
-		});
-		expect(stillUnknown.status).toBe(409);
+		const recovered = await pumping(retry, reviewer.client);
+		expect(recovered.status).toBe(200);
+		expect(await json(recovered)).toMatchObject({ status: "completed", output: { run: 1 } });
 		expect(pendingRuns).toBe(1);
+	}, 45_000);
+
+	it("keeps the idempotency key when a recovered task's peer failure text reads like a local error", async () => {
+		// The recovered path's twin of the live-path test: read as this gateway's
+		// "payload exceeds" error, the peer's words would give a retryable 413, free
+		// the key, and a retry would send the task again.
+		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
+		let runs = 0;
+		let release: () => void = () => undefined;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		reviewer.client.handle("invoice.recovered.peer-text", async () => {
+			runs += 1;
+			await held;
+			throw new AgxPublicError("AGX request: encoded payload exceeds the transport size limit");
+		});
+		const body = JSON.stringify({ peer: reviewer.npub, capability: "invoice.recovered.peer-text", timeoutSec: 20 });
+		const call = () => api("/v1/tasks", {
+			method: "POST",
+			headers: { "idempotency-key": "recovered-peer-text" },
+			body,
+		});
+		const pending = call();
+		pending.catch(() => undefined);
+		await waitForPeer(() => runs === 1, reviewer.client);
+		await gateway.close();
+		await expect(pending).rejects.toThrow();
+		gateway = await startGateway(gatewayOptions());
+		const rejoined = call();
+		release();
+		const recovered = await pumping(rejoined, reviewer.client);
+		expect(recovered.status).toBe(502);
+		const failed = await json(recovered);
+		expect(failed).toMatchObject({ error: { code: "task_failed" } });
+		const retry = await pumping(call(), reviewer.client);
+		expect(retry.status).toBe(502);
+		expect(await json(retry)).toEqual(failed);
+		expect(runs).toBe(1);
 	}, 45_000);
 
 	it("returns a background handle before completion and its stored result after reconnect", async () => {
@@ -721,7 +755,7 @@ describe("agx gateway: outbound", () => {
 		expect(await backgroundTask(failedId)).toEqual(failed);
 	}, 45_000);
 
-	it("reports interrupted background work as unknown without rerunning it", async () => {
+	it("recovers interrupted background work without rerunning it", async () => {
 		const reviewer = await peer({ authorize: "accept-all", maxConcurrentTasks: 2 });
 		let runs = 0;
 		let release: () => void = () => undefined;
@@ -741,12 +775,103 @@ describe("agx gateway: outbound", () => {
 		await waitForPeer(() => runs === 1, reviewer.client);
 		await gateway.close();
 		gateway = await startGateway(gatewayOptions());
-		const unknown = await backgroundTask(id);
-		expect(unknown).toMatchObject({ id, status: "failed", error: { code: "result_unknown" } });
+		expect(await backgroundTask(id)).toMatchObject({ id, status: "running" });
 		release();
-		await new Promise((resolve) => setTimeout(resolve, 1200));
-		expect(await backgroundTask(id)).toEqual(unknown);
+		const completed = await settledBackgroundTask(id, reviewer.client);
+		expect(completed).toMatchObject({
+			id,
+			status: "completed",
+			result: { status: "completed", output: { run: 1 } },
+		});
 		expect(runs).toBe(1);
+	}, 45_000);
+
+	it("starts with stored waiting work above lowered in-flight limits and keeps all of it", async () => {
+		await gateway.close();
+		const path = gatewayTaskOperationsPath(profile);
+		const original = existsSync(path) ? readFileSync(path) : undefined;
+		try {
+			const seeded = new TaskOperationStore(profile);
+			const ids: string[] = [];
+			for (let index = 0; index < 3; index++) {
+				const view = seeded.submit(key, null, { index }, async (operationId: string) => {
+					const base = {
+						key: operationId,
+						taskId: `stored-task-${index}`,
+						peer: "c".repeat(64),
+						capability: "invoice.stored",
+						deadlineAt: Date.now() + 60_000,
+					};
+					seeded.save({ ...base, phase: "publishing" });
+					seeded.save({ ...base, phase: "waiting" });
+					return new Promise<Record<string, unknown>>(() => undefined);
+				});
+				ids.push(view.id as string);
+			}
+			seeded.close();
+
+			gateway = await startGateway({ ...gatewayOptions(), maxTaskOperationsInFlight: 1, maxBackgroundTasksInFlight: 1 });
+			for (const id of ids) {
+				expect(await backgroundTask(id)).toMatchObject({ id, status: "running" });
+			}
+			await gateway.close();
+		} finally {
+			if (original) {
+				writeFileSync(path, original);
+			} else {
+				rmSync(path, { force: true });
+			}
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 45_000);
+
+	it("stops within its shutdown budget while a task request is still publishing", async () => {
+		const original = NostrTransport.prototype.publishMessage;
+		let release: () => void = () => undefined;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let publishes = 0;
+		const spy = vi.spyOn(NostrTransport.prototype, "publishMessage").mockImplementation(async function (
+			this: NostrTransport,
+			...args: Parameters<NostrTransport["publishMessage"]>
+		) {
+			// Only the task request is held: a receipt or a message must not start the count.
+			if (args[1].contentType !== TASK_CONTENT_TYPE) {
+				return original.apply(this, args);
+			}
+			publishes += 1;
+			await held;
+			return original.apply(this, args);
+		});
+		let closing: Promise<void> | undefined;
+		let limit: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const call = api("/v1/tasks", {
+				method: "POST",
+				headers: { "idempotency-key": "shutdown-budget" },
+				body: JSON.stringify({ peer: toNpub(generateKeypair().publicKey), capability: "invoice.slow-relay", timeoutSec: 20 }),
+			});
+			call.catch(() => undefined);
+			await waitFor(() => publishes > 0);
+			const started = Date.now();
+			closing = gateway.close();
+			// The gateway's promise: stopped under the 10 s a container runtime gives.
+			const outcome = await Promise.race([
+				closing.then(() => "stopped"),
+				new Promise((resolve) => {
+					limit = setTimeout(() => resolve("still stopping"), 10_000);
+				}),
+			]);
+			expect(outcome).toBe("stopped");
+			expect(Date.now() - started).toBeLessThan(10_000);
+		} finally {
+			clearTimeout(limit);
+			release();
+			spy.mockRestore();
+			await closing;
+			gateway = await startGateway(gatewayOptions());
+		}
 	}, 45_000);
 });
 

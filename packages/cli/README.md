@@ -449,10 +449,14 @@ outcome still receive it; later retries get `409 outcome_not_retained` instead o
 again. Background outcomes are capped at 1 MiB. A background task with an outcome over that limit
 becomes `failed` with `outcome_not_retained`.
 
-The gateway records an operation before publishing it. If the gateway stops before recording the
-outcome, retries get `409 result_unknown` instead of executing possibly duplicate work. Check the
-remote agent's effects before using a different key. Validation and card-resolution failures that prove
-no task was sent are not retained for synchronous callers, so the same key can retry after the cause is
+The gateway records an operation before publishing it, then keeps its task ID, original peer and
+absolute deadline while it waits. After a planned restart, a stored background or idempotent operation
+can accept the genuine result before that deadline without publishing another task. Results received
+while the gateway was fully down are not guaranteed: the requester does not yet have its own durable
+cursor. An operation interrupted during its publish boundary, or a legacy operation without waiting
+correlation, gets `409 result_unknown` instead of executing possibly duplicate work. Check the remote
+agent's effects before using a different key. Validation and card-resolution failures that prove no
+task was sent are not retained for synchronous callers, so the same key can retry after the cause is
 fixed. A background public ID remains available as `failed` with the real error, while its idempotency
 key is freed for a retry with a new public ID. Publish failures, timeouts and remote task failures are
 retained and replayed: a relay may have stored a task even when publishing reports failure, so remote
@@ -483,9 +487,9 @@ optional `description`. An unknown, evicted, or another credential's ID gets `40
 
 An optional idempotency key makes background retries return the same task ID without publishing
 another AGX request, except after a retryable pre-publish failure as described above. Retained
-completed and failed views survive gateway restart for the same 24-hour retention period. An
-operation interrupted before its outcome was recorded becomes `failed` with `result_unknown`; the
-gateway does not execute it again automatically.
+completed and failed views survive gateway restart for the same 24-hour retention period. A waiting
+operation with durable correlation can recover as described above. One without it becomes `failed`
+with `result_unknown`; the gateway does not execute it again automatically.
 
 ### Subscriptions
 
