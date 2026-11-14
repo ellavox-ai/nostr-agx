@@ -67,7 +67,7 @@ import {
 	setColor,
 	setJsonMode,
 } from "./lib/output.js";
-import { redactSecrets } from "./lib/secrets.js";
+import { holdsSecretKey, redactSecrets } from "./lib/secrets.js";
 import { AGX_CLI_VERSION } from "./lib/version.js";
 
 /**
@@ -77,6 +77,10 @@ import { AGX_CLI_VERSION } from "./lib/version.js";
  */
 const CATEGORY_HELP =
 	"category slug (repeatable): finance, sales, marketing, customer-support, hr, legal, operations, engineering, devops, data, research, productivity, communication, commerce, security";
+
+/** Printed instead of a parser error that quotes a secret key. */
+const PARSER_ERROR_WITH_SECRET_KEY =
+	"error: the command line contains a secret key (nsec1…), so the error that quotes it is not shown. Check the arguments with `agx --help`.\n";
 
 /**
  * Build a fresh `agx` program. A factory, not a module-level singleton,
@@ -89,6 +93,15 @@ export function buildProgram(): Command {
 	// Throw instead of calling process.exit, so runCli can return the exit code.
 	// Set before any subcommand exists: subcommands copy it when created.
 	program.exitOverride();
+
+	// The parser writes its own usage errors straight to stderr and quotes what was typed
+	// (`unknown command '<arg>'`, `too many arguments …: <all args>`), so they never pass
+	// through redactSecrets. A secret key typed where a command or argument belongs must
+	// not come back: the message is replaced, not edited, so no part of it survives.
+	// Set before any subcommand exists: subcommands copy it when created.
+	program.configureOutput({
+		outputError: (text, write) => write(holdsSecretKey(text) ? PARSER_ERROR_WITH_SECRET_KEY : text),
+	});
 
 	program
 		.name("agx")
