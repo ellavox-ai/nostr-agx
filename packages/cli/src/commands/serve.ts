@@ -372,7 +372,13 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			}
 		},
 		onReceipt: (receipt: AgxIncomingReceipt) => {
-			collector.onReceipt(receipt);
+			const counted = collector.onReceipt(receipt);
+			// `--allowed-only` keeps what a sender off the allowlist chose off stdout.
+			// Its receipt's `refEventId` is any string it picked, and when the receipt
+			// answers nothing we sent the store ignores it, so it is not announced.
+			if (options.allowedOnly === true && !counted) {
+				return;
+			}
 			say(
 				`${kleur.green("ACK  ")} from ${shortNpub(toDisplayNpub(receipt.from))}  ${kleur.dim(
 					`ref ${neutralizeControls(receipt.receipt.refEventId.slice(0, 8))}  ${receipt.receipt.status}`,

@@ -136,14 +136,15 @@ export function createCollector(options: {
 		},
 		/**
 		 * A receipt counts only from the peer the message was sent to (anyone who knows an
-		 * event id could otherwise mark it delivered), or from an allowed sender.
+		 * event id could otherwise mark it delivered), or from an allowed sender. Returns
+		 * whether it counted, so a caller that prints receipts can print only those.
 		 */
-		onReceipt(receipt: AgxIncomingReceipt): void {
+		onReceipt(receipt: AgxIncomingReceipt): boolean {
 			const from = toDisplayNpub(receipt.from);
 			const ref = receipt.receipt.refEventId;
 			const matched = options.store.setDeliveryStatus(ref, receipt.receipt.status, from);
 			if (!matched && !options.allowed.has(receipt.from)) {
-				return;
+				return false;
 			}
 			receipts.push({
 				from,
@@ -151,6 +152,7 @@ export function createCollector(options: {
 				status: receipt.receipt.status,
 				at: isoFromSeconds(receipt.createdAt, now()),
 			});
+			return true;
 		},
 		/** Messages stored by this run, oldest first. */
 		get messages(): StoredMessage[] {

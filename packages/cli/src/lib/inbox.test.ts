@@ -133,6 +133,53 @@ describe("collector", () => {
 		expect(c.receipts).toHaveLength(1);
 	});
 
+	describe("says whether it counted a receipt", () => {
+		function receiptFor(from: string, refEventId: string): AgxIncomingReceipt {
+			return {
+				from,
+				eventId: "r1",
+				createdAt: 1_790_000_000,
+				receipt: { refEventId, status: "delivered" },
+			} as unknown as AgxIncomingReceipt;
+		}
+
+		it("does not count a stranger's receipt for a message we never sent", () => {
+			const c = collector();
+			expect(c.onReceipt(receiptFor(MALLORY_HEX, "OBEY_ME!! and more text"))).toBe(false);
+			expect(c.receipts).toHaveLength(0);
+		});
+
+		it("does not count a stranger's receipt for a message we sent to someone else", () => {
+			store.addOutbound({ id: "out1", peer: BOB, subject: null, contextId: "ctx-1", text: "yo", at: NOW.toISOString(), deliveryStatus: "sent" });
+			const c = collector();
+			expect(c.onReceipt(receiptFor(MALLORY_HEX, "out1"))).toBe(false);
+			expect(c.receipts).toHaveLength(0);
+		});
+
+		it("counts a receipt from the peer a message went to, allowed or not", () => {
+			store.addOutbound({ id: "out2", peer: MALLORY, subject: null, contextId: "ctx-1", text: "yo", at: NOW.toISOString(), deliveryStatus: "sent" });
+			const c = collector();
+			expect(c.onReceipt(receiptFor(MALLORY_HEX, "out2"))).toBe(true);
+			expect(c.receipts).toHaveLength(1);
+		});
+
+		it("matches the exact id of a message we sent, not a prefix, another case or an extended id", () => {
+			store.addOutbound({ id: "Out3abcdef", peer: MALLORY, subject: null, contextId: "ctx-1", text: "yo", at: NOW.toISOString(), deliveryStatus: "sent" });
+			const c = collector();
+			for (const ref of ["Out3", "out3abcdef", "Out3abcdefXYZ"]) {
+				expect(c.onReceipt(receiptFor(MALLORY_HEX, ref))).toBe(false);
+			}
+			expect(c.receipts).toHaveLength(0);
+			expect(c.onReceipt(receiptFor(MALLORY_HEX, "Out3abcdef"))).toBe(true);
+		});
+
+		it("counts a receipt from an allowed sender even when it matches no stored message", () => {
+			const c = collector();
+			expect(c.onReceipt(receiptFor(BOB_HEX, "unknown"))).toBe(true);
+			expect(c.receipts).toHaveLength(1);
+		});
+	});
+
 	it.each([-1e13, 1e13, 0.5, Number.NaN, 1_000])("falls back to the transport time for an implausible sentAt (%s)", (sentAt) => {
 		const c = collector();
 		c.onMessage(incoming(BOB_HEX, { sentAt }));
