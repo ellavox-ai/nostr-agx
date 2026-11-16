@@ -115,6 +115,44 @@
       }
     },
     {
+      "id": "request-supports-working",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"req\",\"taskId\":\"task-4\",\"capability\":\"report.build\",\"payload\":{},\"supportsWorking\":true}",
+      "valid": true,
+      "envelope": {
+        "t": "req",
+        "taskId": "task-4",
+        "capability": "report.build",
+        "payload": {},
+        "supportsWorking": true
+      }
+    },
+    {
+      "id": "update-working-minimal",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"res\",\"taskId\":\"task-4\",\"status\":\"working\",\"seq\":1}",
+      "valid": true,
+      "envelope": {
+        "t": "res",
+        "taskId": "task-4",
+        "status": "working",
+        "seq": 1
+      }
+    },
+    {
+      "id": "update-working-message",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"res\",\"taskId\":\"task-4\",\"status\":\"working\",\"seq\":2,\"message\":\"Fetched 3 of 5 sources\"}",
+      "valid": true,
+      "envelope": {
+        "t": "res",
+        "taskId": "task-4",
+        "status": "working",
+        "seq": 2,
+        "message": "Fetched 3 of 5 sources"
+      }
+    },
+    {
       "id": "cancellation",
       "spec": "packages/core/SPEC.md#task-lifecycle",
       "text": "{\"t\":\"cancel\",\"taskId\":\"task-2\"}",
@@ -164,6 +202,24 @@
       "id": "input-missing-correlation-id",
       "spec": "packages/core/SPEC.md#task-lifecycle",
       "text": "{\"t\":\"input\",\"taskId\":\"task-2\",\"input\":\"INV-001\"}",
+      "valid": false
+    },
+    {
+      "id": "request-supports-working-non-boolean",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"req\",\"taskId\":\"task-4\",\"capability\":\"report.build\",\"payload\":{},\"supportsWorking\":\"yes\"}",
+      "valid": false
+    },
+    {
+      "id": "update-working-seq-zero",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"res\",\"taskId\":\"task-4\",\"status\":\"working\",\"seq\":0}",
+      "valid": false
+    },
+    {
+      "id": "update-working-message-too-long",
+      "spec": "packages/core/SPEC.md#task-lifecycle",
+      "text": "{\"t\":\"res\",\"taskId\":\"task-4\",\"status\":\"working\",\"seq\":1,\"message\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
       "valid": false
     }
   ]

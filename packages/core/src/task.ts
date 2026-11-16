@@ -42,12 +42,29 @@ export const taskRequestSchema = z.object({
 	capability: z.string().min(1).max(200),
 	payload: z.unknown(),
 	supportsInput: z.boolean().optional(),
+	/** Opt-in to nonterminal `working` updates; absent means false. */
+	supportsWorking: z.boolean().optional(),
 	timeoutMs: z.number().int().min(0).optional(),
 });
 export type TaskRequestEnvelope = z.infer<typeof taskRequestSchema>;
 
+/** A non-terminal `working` update: public progress text from the handler,
+ * ordered by `seq` (starting at 1) so a requester can drop duplicates and older
+ * updates. Rides in the `res` envelope next to `input-required`. */
+export const taskWorkingUpdateSchema = z.object({
+	t: z.literal("res"),
+	taskId: z.string().min(1).max(200),
+	status: z.literal("working"),
+	seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+	message: z.string().max(2000).optional(),
+});
+export type TaskWorkingUpdate = z.infer<typeof taskWorkingUpdateSchema>;
+/** A `working` update as handed to a requester callback (no wire tag). */
+export type TaskStatusUpdate = Omit<TaskWorkingUpdate, "t">;
+
 /** Wire envelope for a task status update or terminal result. */
 export const taskResultSchema = z.discriminatedUnion("status", [
+	taskWorkingUpdateSchema,
 	z.object({
 		t: z.literal("res"),
 		taskId: z.string().min(1).max(200),

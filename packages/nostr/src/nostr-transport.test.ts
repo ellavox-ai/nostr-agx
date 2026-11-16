@@ -502,3 +502,85 @@ describe("publishReceipt routes to peer relays", () => {
 		expect(resolvePeerRelays).toHaveBeenCalledTimes(2);
 	});
 });
+
+
+describe("typed discovery advertisement", () => {
+	it("publishes handler skills supplied through advertise", async () => {
+		publishToRelays.mockImplementation(async (targets: string[]) =>
+			published({ targets }),
+		);
+		const skill = {
+			id: "invoice.review",
+			description: "Review an invoice",
+			inputSchema: {
+				type: "object",
+				required: ["amount"],
+				properties: { amount: { type: "number" } },
+			},
+		};
+
+		await (await transport()).advertise(["invoice.review"], {
+			skills: [skill],
+		});
+
+		const cardCall = publishToRelays.mock.calls.find(
+			(call: unknown[]) => (call[1] as { kind?: number }).kind === 11337,
+		);
+		expect(cardCall).toBeDefined();
+		const card = JSON.parse((cardCall?.[1] as { content: string }).content);
+		expect(card.version).toBe("1.1.0");
+		expect(card.skills).toEqual([skill]);
+	});
+
+	function publishedCard(): Record<string, unknown> {
+		const cardCall = publishToRelays.mock.calls.find(
+			(call: unknown[]) => (call[1] as { kind?: number }).kind === 11337,
+		);
+		expect(cardCall).toBeDefined();
+		return JSON.parse((cardCall?.[1] as { content: string }).content);
+	}
+
+	it("publishes legacy capabilities and the valid skills when one supplied skill is invalid", async () => {
+		publishToRelays.mockImplementation(async (targets: string[]) =>
+			published({ targets }),
+		);
+		const warn = vi.fn();
+		const agent = await NostrTransport.create({
+			signer: localSigner(generateSecretKey()),
+			relays: [OURS],
+			logger: { warn },
+		});
+		const valid = { id: "invoice.review", description: "Review an invoice" };
+
+		const result = await agent.advertise(["invoice.review", "invoice.pay"], {
+			skills: [valid, { id: "invoice.*", description: "x" }],
+		});
+
+		expect(result.ok).toBe(true);
+		const card = publishedCard();
+		expect(card.capabilities).toEqual(["invoice.review", "invoice.pay"]);
+		expect(card.skills).toEqual([valid]);
+		expect(card.version).toBe("1.1.0");
+		expect(warn).toHaveBeenCalledWith(
+			"AGX: typed metadata left off the Agent Card",
+			expect.objectContaining({ code: "invalid_typed_skill" }),
+		);
+	});
+
+	it("publishes a skill with exactly 16 features", async () => {
+		publishToRelays.mockImplementation(async (targets: string[]) =>
+			published({ targets }),
+		);
+		const skill = {
+			id: "invoice.review",
+			description: "Review an invoice",
+			features: Array.from({ length: 16 }, (_, i) => `feature.${i}`),
+		};
+
+		await (await transport()).advertise(["invoice.review"], {
+			skills: [skill],
+		});
+
+		expect(publishedCard().skills).toEqual([skill]);
+	});
+});

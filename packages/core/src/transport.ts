@@ -1,3 +1,4 @@
+import type { AgxJsonSchema } from "./json-schema";
 import type {
 	ExchangeEvidence,
 	ParsedExchangeMessage,
@@ -148,6 +149,7 @@ export interface AgxTransport {
 			org?: string;
 			nip05?: string | null;
 			payloadTypes?: string[];
+			skills?: AgxAgentSkill[];
 		},
 	): Promise<{ ok: boolean }>;
 
@@ -180,7 +182,9 @@ export interface AgxIncomingMessage extends ParsedExchangeMessage {
 	 * than the real send time by up to the transport's `pollLookbackSec`. */
 	createdAt: number;
 	/** When the sender says it sent this, if the transport carries that
-	 * separately from `createdAt`. Sender-declared; display only. */
+	 * separately from `createdAt`. Sender-declared and unverifiable. Shown to
+	 * people, and used to put one poll's messages in send order, but only between
+	 * `createdAt` and `createdAt + pollLookbackSec`. */
 	sentAt?: number;
 	/** The id of the transport envelope this arrived in, when it differs from
 	 * `eventId` (a Nostr gift wrap's id vs. its rumor's). What `isKnown` is asked
@@ -213,11 +217,39 @@ export interface AgxPollResult {
 	discarded?: string[];
 }
 
+export interface AgxAgentSkill {
+	id: string;
+	description: string;
+	tags?: string[];
+	inputModes?: string[];
+	outputModes?: string[];
+	inputSchema?: AgxJsonSchema;
+	outputSchema?: AgxJsonSchema;
+	features?: string[];
+}
+
+export interface AgxAgentCardExtension {
+	uri: string;
+	required?: boolean;
+}
+
+export interface AgxAgentCardMetadataWarning {
+	code:
+		| "invalid_typed_metadata"
+		| "invalid_typed_skill"
+		| "invalid_typed_extension"
+		| "unsupported_required_extension";
+	message: string;
+}
+
 export interface AgxPeerCard {
 	displayName: string | null;
 	capabilities: string[];
 	/** Claimed (unverified) domain identity, e.g. NIP-05 `name@domain`. */
 	nip05: string | null;
+	skills?: AgxAgentSkill[];
+	extensions?: AgxAgentCardExtension[];
+	typedMetadataWarnings?: AgxAgentCardMetadataWarning[];
 }
 
 export interface AgxResolvedPeer {
