@@ -23,10 +23,37 @@ const agx = new AgxClient({
 });
 
 // The runtime only writes handlers; the library owns dispatch → lifecycle → result → receipt.
-agx.handle("invoice.review", async (task) => paperclip.run(task.payload));
+agx.handle("invoice.review", async (task) => paperclip.run(task.payload), {
+  description: "Review an invoice against approval policy",
+  inputSchema: {
+    type: "object",
+    required: ["amount"],
+    properties: { amount: { type: "number", minimum: 0 } },
+  },
+  outputSchema: {
+    type: "object",
+    required: ["approved"],
+    properties: { approved: { type: "boolean" } },
+  },
+});
 
 await agx.start();
+
+// Optional: resolve the peer's typed card and reject bad input before publishing
+// (`streamRequest` accepts the same option).
+const result = await agx.request(peer, "invoice.review", { amount: 25 }, {
+  validate: true,
+});
 ```
+
+Contracts are optional. `handle()` refuses a contract the Agent Card would refuse, and keeps its own
+copy. Values are validated as the JSON they become on the wire, so an `undefined` member, a `Date` or a
+class instance is checked as its encoding. Authorized invalid input returns `invalid_input` without
+running the handler; invalid handler output returns `invalid_output`. With `validate: true`, a payload
+the peer's valid input schema refuses throws `AgxInvalidInputError` before anything is sent; with no
+usable schema the request is sent unchecked, and a peer's own `invalid_input` arrives as
+`AgxTaskFailedError`. Detailed validation paths stay local. Legacy handlers
+and peers without typed schemas keep working, and validation never fetches a referenced schema.
 
 Live transport listeners are registered by `start()` and removed by `stop()`.
 Transport `onMessage` and `onReceipt` hooks return an `Unsubscribe` function;
@@ -47,8 +74,8 @@ path as polling, so live transport hooks are optional. The requester obtains an
 answer through its own UI or policy and sends it with
 `stream.provideInput(inputRequestId, answer)`. The answer continues the same task.
 The suspended handler state is in memory and does not survive a process restart.
-The handler must validate answers itself; `inputSchema` is advisory and is not
-validated by the protocol core. A requester timeout or stop sends a cancellation
+The handler must validate answers itself; an input requirement's `inputSchema` is advisory
+and is not validated by the protocol core (task contracts above are a separate check). A requester timeout or stop sends a cancellation
 so the responder stops waiting and does not send a late result.
 
 > Status: **0.2.0 (draft)** — API is stabilizing alongside the NIP-AGX spec (`SPEC.md`).
