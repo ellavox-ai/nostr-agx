@@ -1,4 +1,4 @@
-import type { AgxPollResult, AgxTransport } from "@nostr-agx/core";
+import type { AgxPollResult, AgxTransport, PendingRequestStore } from "@nostr-agx/core";
 import { describe, expect, it } from "vitest";
 import { Requester } from "./requester.js";
 
@@ -33,5 +33,26 @@ describe("Requester", () => {
 		// Nobody waits: the result poll has stopped.
 		expect(polls()).toBeLessThanOrEqual(after + 1);
 		requester.stop();
+	});
+
+	it("restores the full gateway waiting capacity", async () => {
+		const { transport } = silentTransport();
+		const records = Array.from({ length: 320 }, (_, index) => ({
+			key: `operation-${index}`,
+			taskId: `task-${index}`,
+			peer: "peer",
+			capability: "x.y",
+			deadlineAt: null,
+			phase: "waiting" as const,
+		}));
+		const store: PendingRequestStore = {
+			list: () => records,
+			save: () => undefined,
+			remove: () => undefined,
+		};
+		const requester = new Requester(transport, undefined, store);
+		const recovered = await requester.restore();
+		expect(recovered).toHaveLength(320);
+		await requester.stop();
 	});
 });

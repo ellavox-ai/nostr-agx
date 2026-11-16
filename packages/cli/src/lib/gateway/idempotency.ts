@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
+import type { PendingRequestRecord, PendingRequestStore, RecoveredPendingRequest } from "@nostr-agx/core";
 import { z } from "zod";
 import { gatewayTaskOperationsPath, writePrivateJson } from "../paths.js";
 import { ApiError } from "./http.js";
@@ -36,6 +37,13 @@ const outcomeSchema = z.discriminatedUnion("kind", [
 		description: z.string().optional(),
 	}),
 ]);
+const requestSchema = z.object({
+	taskId: z.string().min(1).max(200),
+	peer: z.string().regex(/^[0-9a-f]{64}$/),
+	capability: z.string().min(1).max(200),
+	deadlineAt: z.number().int().nonnegative().nullable(),
+	phase: z.enum(["publishing", "waiting"]),
+});
 const operationSchema = z.object({
 	id: z.string().regex(/^[0-9a-f]{64}$/),
 	publicId: z.string().regex(PUBLIC_TASK_ID_PATTERN).optional(),
@@ -45,8 +53,12 @@ const operationSchema = z.object({
 	keyed: z.boolean().default(false),
 	createdAt: z.number().int(),
 	updatedAt: z.number().int(),
+	request: requestSchema.optional(),
 	outcome: outcomeSchema.nullable(),
 });
+// Still version 1: `request` is optional, and gateways from before it strip the
+// unknown field and report that work as result_unknown. A version they do not
+// know would make them quarantine the file and forget every completed key.
 const fileSchema = z.object({
 	version: z.literal(1),
 	operations: z.array(operationSchema).default([]),
@@ -54,6 +66,14 @@ const fileSchema = z.object({
 
 type Outcome = z.infer<typeof outcomeSchema>;
 type Operation = z.infer<typeof operationSchema>;
+type RequestCorrelation = z.infer<typeof requestSchema>;
+
+export interface RecoveredTaskOperation {
+	taskId: string;
+	peer: string;
+	capability: string;
+	result: Promise<unknown>;
+}
 
 export interface TaskIdempotencyOptions {
 	now?: () => number;
@@ -156,8 +176,9 @@ export function parseIdempotencyKey(value: string | string[] | undefined): strin
 
 /** Durable task outcomes for POST /v1/tasks. The profile lock makes this a
  * single-writer store; callers sharing an operation also share its promise. */
-export class TaskOperationStore {
+export class TaskOperationStore implements PendingRequestStore {
 	private readonly path: string;
+	private readonly restoreCandidates = new Map<string, RequestCorrelation>();
 	private readonly now: () => number;
 	private readonly retentionMs: number;
 	private readonly maxOperationsPerCredential: number;
@@ -193,8 +214,10 @@ export class TaskOperationStore {
 		let changed = this.prune();
 		for (const operation of this.records.values()) {
 			if (operation.outcome === null) {
-				this.setOutcome(operation, unknownOutcome());
-				changed = true;
+				if (!operation.request) {
+					this.setOutcome(operation, unknownOutcome());
+					changed = true;
+				}
 			} else {
 				const retained = this.retainedOutcome(operation.outcome, operation.background);
 				if (retained !== operation.outcome) {
@@ -215,7 +238,7 @@ export class TaskOperationStore {
 		credential: string,
 		key: string,
 		body: unknown,
-		operation: () => Promise<Record<string, unknown>>,
+		operation: (operationId: string) => Promise<Record<string, unknown>>,
 	): Promise<Record<string, unknown>> {
 		this.assertOpen();
 		if (this.prune()) {
@@ -269,7 +292,7 @@ export class TaskOperationStore {
 			}
 			throw error;
 		}
-		const running = this.perform(created, operation);
+		const running = this.perform(created, () => operation(id));
 		this.inFlight.set(id, running);
 		this.synchronousInFlight.add(id);
 		try {
@@ -286,7 +309,7 @@ export class TaskOperationStore {
 		credential: string,
 		key: string | null,
 		body: unknown,
-		operation: () => Promise<Record<string, unknown>>,
+		operation: (operationId: string) => Promise<Record<string, unknown>>,
 	): Record<string, unknown> {
 		this.assertOpen();
 		if (this.prune()) {
@@ -338,7 +361,7 @@ export class TaskOperationStore {
 			}
 			throw error;
 		}
-		const running = this.perform(created, operation);
+		const running = this.perform(created, () => operation(id));
 		this.inFlight.set(id, running);
 		this.backgroundInFlight.add(id);
 		void running.catch(() => undefined).finally(() => {
@@ -348,6 +371,113 @@ export class TaskOperationStore {
 			}
 		});
 		return this.view(created);
+	}
+
+	list(): PendingRequestRecord[] {
+		this.restoreCandidates.clear();
+		const pending: PendingRequestRecord[] = [];
+		for (const operation of this.records.values()) {
+			if (operation.outcome !== null || !operation.request) continue;
+			this.restoreCandidates.set(operation.id, { ...operation.request });
+			pending.push({ key: operation.id, ...operation.request });
+		}
+		return pending;
+	}
+
+	save(record: PendingRequestRecord): void {
+		this.assertOpen();
+		const parsed = requestSchema.safeParse({
+			taskId: record.taskId,
+			peer: record.peer,
+			capability: record.capability,
+			deadlineAt: record.deadlineAt,
+			phase: record.phase,
+		});
+		if (!parsed.success) {
+			// The reader would quarantine the whole file over one bad record.
+			throw new ApiError(500, "idempotency_store_failed", "Pending request correlation is invalid");
+		}
+		const operation = this.records.get(record.key);
+		if (!operation || operation.outcome !== null) {
+			throw new ApiError(500, "idempotency_store_failed", "The pending task operation is unavailable");
+		}
+		const previous = operation.request;
+		if (previous && (
+			previous.taskId !== record.taskId ||
+			previous.peer !== record.peer ||
+			previous.capability !== record.capability ||
+			previous.deadlineAt !== record.deadlineAt ||
+			(previous.phase === "waiting" && record.phase === "publishing")
+		)) {
+			throw new ApiError(500, "idempotency_store_failed", "Pending request correlation or phase change is invalid");
+		}
+		this.writeRequest(operation, parsed.data);
+	}
+
+	remove(key: string): void {
+		// After close() the outcome can no longer be saved; keeping the waiting
+		// record lets the next start recover the result instead of reporting unknown.
+		this.assertOpen();
+		const operation = this.records.get(key);
+		if (!operation?.request) return;
+		this.writeRequest(operation, undefined);
+	}
+
+	recover(
+		recovered: RecoveredPendingRequest[],
+		run: (operation: RecoveredTaskOperation) => Promise<Record<string, unknown>>,
+	): void {
+		this.assertOpen();
+		const handles = new Map(recovered.map((handle) => [handle.key, handle]));
+		for (const [id, correlation] of this.restoreCandidates) {
+			const operation = this.records.get(id);
+			if (!operation || operation.outcome !== null) continue;
+			const handle = handles.get(id);
+			if (!handle) {
+				this.setOutcome(operation, unknownOutcome());
+				this.persist();
+				continue;
+			}
+			const running = this.perform(operation, () => run({
+				taskId: correlation.taskId,
+				peer: correlation.peer,
+				capability: correlation.capability,
+				result: handle.result,
+			}));
+			this.inFlight.set(id, running);
+			if (operation.background) {
+				this.backgroundInFlight.add(id);
+			} else {
+				this.synchronousInFlight.add(id);
+			}
+			void running.catch(() => undefined).finally(() => {
+				this.backgroundInFlight.delete(id);
+				this.synchronousInFlight.delete(id);
+				if (this.inFlight.get(id) === running) this.inFlight.delete(id);
+			});
+		}
+		this.restoreCandidates.clear();
+	}
+
+	private writeRequest(operation: Operation, request: RequestCorrelation | undefined): void {
+		const previous = operation.request;
+		const previousUpdatedAt = operation.updatedAt;
+		operation.request = request;
+		operation.updatedAt = this.now();
+		this.put(operation);
+		const evicted = this.enforceByteBudget(operation.id);
+		try {
+			if (this.totalBytes > this.maxStoreBytes) {
+				throw new ApiError(503, "idempotency_store_full", "The gateway task store is full");
+			}
+			this.persist();
+		} catch (error) {
+			operation.request = previous;
+			operation.updatedAt = previousUpdatedAt;
+			this.put(operation);
+			for (const settled of evicted) this.put(settled);
+			throw error;
+		}
 	}
 
 	get(credential: string, publicId: string): Record<string, unknown> | null {
@@ -379,7 +509,7 @@ export class TaskOperationStore {
 		this.closed = true;
 		let changed = false;
 		for (const operation of this.records.values()) {
-			if (operation.outcome === null) {
+			if (operation.outcome === null && operation.request?.phase !== "waiting") {
 				this.setOutcome(operation, unknownOutcome());
 				changed = true;
 			}
