@@ -1,3 +1,4 @@
+import type { AgxPeerCard } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import { z } from "zod";
 import { toNpub } from "./address";
@@ -5,6 +6,12 @@ import { CARD_KIND, RELAY_LIST_KIND } from "./kinds";
 import { fetchByAuthor, fetchByAuthorWithStatus } from "./relay-pool";
 import type { AgxSigner } from "./signer";
 import { assertPublicUrl } from "./ssrf";
+import {
+	type AgentCardExtension,
+	type AgentCardMetadataWarning,
+	type AgentSkill,
+	parseAgentCardMetadata,
+} from "./typed-card";
 
 /**
  * NIP-AGX discovery: publish/resolve a signed, UNENCRYPTED Agent Card + NIP-65
@@ -13,6 +20,7 @@ import { assertPublicUrl } from "./ssrf";
  */
 
 export const CARD_VERSION = "1.0.0";
+export const TYPED_CARD_VERSION = "1.1.0";
 /** Cap peer-advertised relays we'll accept (SSRF blast-radius + fan-out). */
 const MAX_PEER_RELAYS = 10;
 /** Cap DISTINCT peer-advertised relay candidates we'll even DNS-check, so a card
@@ -41,10 +49,11 @@ export interface AgentCard {
 	payloadTypes: string[];
 	encryption: string[];
 	version: string;
+	skills?: AgentSkill[];
+	extensions?: AgentCardExtension[];
 }
 
-/** Build an Agent Card object for the given identity/metadata. */
-export function buildCard(params: {
+type BuildCardParams = {
 	org: string;
 	pubkey: string;
 	nip05?: string | null;
@@ -52,17 +61,47 @@ export function buildCard(params: {
 	capabilities: string[];
 	payloadTypes: string[];
 	encryption?: string[];
-}): AgentCard {
+	skills?: AgentSkill[];
+	extensions?: AgentCardExtension[];
+};
+
+/** Build an Agent Card object for the given identity/metadata. Typed metadata
+ * the card rules refuse is left off (see {@link buildCardWithWarnings}); the
+ * legacy fields are always published. */
+export function buildCard(params: BuildCardParams): AgentCard {
+	return buildCardWithWarnings(params).card;
+}
+
+/** {@link buildCard}, plus why any typed metadata was left off. An invalid
+ * skill is dropped rather than stopping the card, so the legacy capabilities
+ * stay discoverable. */
+export function buildCardWithWarnings(params: BuildCardParams): {
+	card: AgentCard;
+	warnings: AgentCardMetadataWarning[];
+} {
+	const declaredExtensions = new Set(
+		(params.extensions ?? []).map((extension) => extension.uri),
+	);
+	const typed = parseAgentCardMetadata(params, declaredExtensions);
+	const hasTypedMetadata =
+		typed.skills !== undefined || typed.extensions !== undefined;
 	return {
-		v: 1,
-		org: params.org,
-		npub: toNpub(params.pubkey),
-		nip05: params.nip05 ?? null,
-		relays: params.relays,
-		capabilities: params.capabilities,
-		payloadTypes: params.payloadTypes,
-		encryption: params.encryption ?? ["nip44"],
-		version: CARD_VERSION,
+		card: {
+			v: 1,
+			org: params.org,
+			npub: toNpub(params.pubkey),
+			nip05: params.nip05 ?? null,
+			relays: params.relays,
+			capabilities: params.capabilities,
+			payloadTypes: params.payloadTypes,
+			encryption: params.encryption ?? ["nip44"],
+			version: hasTypedMetadata ? TYPED_CARD_VERSION : CARD_VERSION,
+			...(typed.skills === undefined ? {} : { skills: typed.skills }),
+			...(typed.extensions === undefined
+				? {}
+				: { extensions: typed.extensions }),
+		},
+		warnings: typed.warnings ?? [],
 	};
 }
 
@@ -143,11 +182,7 @@ export async function resolvePeerRelays(
 }
 
 /** A peer's Agent Card, as {@link resolvePeerCard} returns it. */
-export interface PeerCard {
-	displayName: string | null;
-	capabilities: string[];
-	nip05: string | null;
-}
+export type PeerCard = AgxPeerCard;
 
 /** Resolve a peer's Agent Card. Best-effort; null when none/malformed. */
 export async function resolvePeerCard(
@@ -210,10 +245,18 @@ function parsePeerCard(latest: Event | undefined): PeerCard | null {
 		return null;
 	}
 	const c = parsed.data;
+	const typed = parseAgentCardMetadata(raw);
 	return {
 		displayName: c.org ? c.org.slice(0, 120) : null,
 		capabilities: c.capabilities ?? [],
 		nip05: c.nip05 ?? null,
+		...(typed.skills === undefined ? {} : { skills: typed.skills }),
+		...(typed.extensions === undefined
+			? {}
+			: { extensions: typed.extensions }),
+		...(typed.warnings === undefined
+			? {}
+			: { typedMetadataWarnings: typed.warnings }),
 	};
 }
 

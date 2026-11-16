@@ -25,6 +25,45 @@ agx.handle("invoice.review", async (task) => paperclip.run(task.payload));
 await agx.start();
 ```
 
+### Typed Agent Card skills
+
+`buildCard` and `NostrTransport.publishDiscovery` accept optional `skills` and `extensions`. Typed cards
+use format version `1.1.0`; existing callers and legacy-only cards remain on `1.0.0`.
+
+```ts
+await transport.publishDiscovery({
+  org: "Acme Finance",
+  capabilities: ["invoice.review"],
+  payloadTypes: ["application/json"],
+  skills: [{
+    id: "invoice.review",
+    description: "Review an invoice against approval policy",
+    inputModes: ["application/json"],
+    outputModes: ["application/json"],
+    inputSchema: {
+      type: "object",
+      required: ["amount"],
+      properties: { amount: { type: "number", minimum: 0 } },
+      additionalProperties: false,
+    },
+  }],
+  extensions: [{ uri: "agx.task-status.v1", required: false }],
+});
+```
+
+`resolvePeerCard` returns bounded, validated typed metadata plus `typedMetadataWarnings` listing what
+was left out. Invalid typed metadata never hides valid legacy capabilities. An invalid skill is dropped
+on its own (`invalid_typed_skill`) and the card's other skills stay usable; a structural failure or
+typed metadata over 32 KiB, measured inside the event's escaped `content`, ignores the whole typed unit
+(`invalid_typed_metadata`). Unknown fields on skills and extensions are ignored, and the schema
+annotations `description`, `title`, `$schema`, `default` and `examples` are accepted and ignored.
+Unknown required extensions hide typed skills but leave legacy fields usable; optional extensions are
+retained. `buildCard` and `publishDiscovery` leave an invalid skill off the card instead of refusing
+it (`buildCardWithWarnings` returns why; `publishDiscovery` logs it). `AgxClient` can enforce
+these schemas for authorized task input and handler output, and offers opt-in requester preflight.
+Validation never fetches references or treats claims as proof of quality. Agent Cards and schemas are
+public and unencrypted.
+
 `NostrTransport.create()` only constructs the transport. `AgxClient.start()` opens its relay subscriptions, and `AgxClient.stop()` closes both those subscriptions and their relay connections.
 Live subscriptions replay a bounded recent window, skip envelopes already in the client's `SeenStore` before decryption, and record expired or invalid wraps there; polling remains the completeness and recovery path.
 

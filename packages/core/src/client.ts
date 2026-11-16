@@ -1,5 +1,20 @@
-import { AgxPublicError, AgxTaskDeclined, AgxTaskFailedError } from "./errors";
+import {
+	AGX_AGENT_CARD_LIMITS,
+	agxEncodedJsonBytes,
+	parseAgxAgentSkill,
+} from "./agent-card";
+import {
+	AgxInvalidInputError,
+	AgxPublicError,
+	AgxTaskDeclined,
+	AgxTaskFailedError,
+} from "./errors";
 import { randomId } from "./id";
+import {
+	agxWireJson,
+	validateAgxJsonPayload,
+	validateAgxJsonSchema,
+} from "./json-schema";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
 import {
@@ -14,8 +29,10 @@ import {
 	type InputRequiredUpdate,
 } from "./task";
 import type {
+	AgxAgentSkill,
 	AgxIncomingMessage,
 	AgxIncomingReceipt,
+	AgxPeerCard,
 	AgxTransportListenerOptions,
 	AgxTransport,
 	Unsubscribe,
@@ -41,6 +58,23 @@ export type TaskHandler<Payload = unknown, Output = unknown> = (
 	task: Task<Payload>,
 	ctx: HandlerContext,
 ) => Output | Promise<Output>;
+
+export type AgxTaskContract = Omit<AgxAgentSkill, "id">;
+
+const taskContractFields = new Set([
+	"description",
+	"tags",
+	"inputModes",
+	"outputModes",
+	"inputSchema",
+	"outputSchema",
+	"features",
+]);
+
+interface RegisteredTaskHandler {
+	handler: TaskHandler;
+	contract?: AgxTaskContract;
+}
 
 export type HandlerContext = {
 	/** The peer that sent the task request. */
@@ -298,7 +332,7 @@ export class AgxClient {
 	private readonly receiptListeners = new Set<
 		(receipt: AgxIncomingReceipt) => void
 	>();
-	private readonly handlers = new Map<string, TaskHandler>();
+	private readonly handlers = new Map<string, RegisteredTaskHandler>();
 	private readonly pending = new Map<string, Pending>();
 	private readonly pendingTaskInputs = new Map<string, PendingTaskInput>();
 	private readonly activeInboundTasks = new Map<string, { canceled: boolean }>();
@@ -381,13 +415,57 @@ export class AgxClient {
 		return new TextEncoder().encode(text).length <= MAX_BODY_BYTES;
 	}
 
-	/** Register a capability handler. The set of registered keys is what `start()`
-	 * advertises on the Agent Card (discovery + capability matching are automatic). */
+	/** Register a capability handler and, optionally, its public typed contract.
+	 * The contract must pass the same rules the Agent Card applies to a typed
+	 * skill, so a contract accepted here can always be published. The client
+	 * keeps its own copy: changing `contract` afterwards has no effect. */
 	handle<Payload = unknown, Output = unknown>(
 		capability: string,
 		handler: TaskHandler<Payload, Output>,
+		contract?: AgxTaskContract,
 	): this {
-		this.handlers.set(capability, handler as TaskHandler);
+		let registered: AgxTaskContract | undefined;
+		if (contract) {
+			// Stricter than a card reader, which ignores unknown fields: here an
+			// unknown field is most likely a typo such as `inputschema`.
+			const unknownField = Object.keys(contract).find(
+				(field) => !taskContractFields.has(field),
+			);
+			if (unknownField !== undefined) {
+				throw new Error(
+					`AGX handler ${capability} contract: unknown field ${unknownField.slice(0, 120)}`,
+				);
+			}
+			const parsed = parseAgxAgentSkill({ ...contract, id: capability });
+			if ("problem" in parsed) {
+				throw new Error(
+					`AGX handler ${capability} contract: ${parsed.problem}`,
+				);
+			}
+			// The card carries every typed skill, so check the set this one
+			// would join (replacing any earlier contract for the capability).
+			const skills = [
+				...this.typedSkills().filter((skill) => skill.id !== capability),
+				parsed.skill,
+			];
+			if (skills.length > AGX_AGENT_CARD_LIMITS.skills) {
+				throw new Error(
+					`AGX handler ${capability} contract: more than ${AGX_AGENT_CARD_LIMITS.skills} typed skills`,
+				);
+			}
+			const bytes = agxEncodedJsonBytes({ skills });
+			if (bytes === null || bytes > AGX_AGENT_CARD_LIMITS.metadataBytes) {
+				throw new Error(
+					`AGX handler ${capability} contract: typed skills would exceed ${AGX_AGENT_CARD_LIMITS.metadataBytes} bytes as encoded in the Agent Card event`,
+				);
+			}
+			const { id: _id, ...copy } = parsed.skill;
+			registered = copy;
+		}
+		this.handlers.set(capability, {
+			handler: handler as TaskHandler,
+			contract: registered,
+		});
 		return this;
 	}
 
@@ -396,34 +474,86 @@ export class AgxClient {
 		return [...this.handlers.keys()];
 	}
 
-	/**
-	 * Send a task and return progress events plus its final `result` promise.
-	 * Live updates and final results use the pending-request dispatch path, so
-	 * polling-only transports work as well.
-	 */
+	private typedSkills(): AgxAgentSkill[] {
+		return [...this.handlers].flatMap(([id, registered]) =>
+			registered.contract ? [{ ...registered.contract, id }] : [],
+		);
+	}
+
+	/** Check the payload against the peer's typed skill before anything is
+	 * published or registered, throwing {@link AgxInvalidInputError} on a
+	 * failure. It checks only when the peer's card has a valid input schema
+	 * for exactly this capability; with no card, no such skill or schema, an
+	 * invalid schema, or a failed lookup, the payload is sent unchecked.
+	 * Callers await this only when `validate` is set, so a plain request still
+	 * publishes in the same tick. The peer lookup runs before the request's
+	 * `timeoutMs` deadline starts, so that deadline does not cover it. */
+	private async preflightInput(
+		peer: string,
+		capability: string,
+		payload: unknown,
+	): Promise<unknown> {
+		let card: AgxPeerCard | null;
+		try {
+			card = (await this.transport.resolvePeer(peer)).card;
+		} catch (error) {
+			this.log.debug?.("AGX: peer card lookup failed; sending unchecked", {
+				peer,
+				capability,
+				error: String(error),
+			});
+			return payload;
+		}
+		const schema = card?.skills?.find(
+			(candidate) => candidate.id === capability,
+		)?.inputSchema;
+		// A transport need not run the card reader's checks, so make sure the
+		// schema is one this client can apply before trusting its verdict.
+		if (!schema || validateAgxJsonSchema(schema)) return payload;
+		const wire = agxWireJson(payload);
+		if (!wire.ok) {
+			throw new AgxInvalidInputError(`$: ${wire.problem}`);
+		}
+		const problem = validateAgxJsonPayload(schema, wire.value);
+		if (problem) {
+			throw new AgxInvalidInputError(problem);
+		}
+		// Send the value that was checked, so a toJSON that answers differently
+		// on a second call cannot put something else on the wire.
+		return wire.value;
+	}
+
+	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
+	 * result, an unsupported capability, timeout, or opted-in schema preflight. */
 	async request<Output = unknown>(
 		peer: string,
 		capability: string,
 		payload: unknown,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; validate?: boolean },
 	): Promise<Output> {
+		const sent = opts?.validate
+			? await this.preflightInput(peer, capability, payload)
+			: payload;
 		const { result } = await this.sendRequest<Output>(
 			peer,
 			capability,
-			payload,
+			sent,
 			{ ...opts, supportsInput: false },
 		);
 		return result;
 	}
 
 	/** Send a task to a peer and await its correlated result. Rejects on a `failed`
-	 * result, an unsupported capability, or timeout. */
+	 * result, an unsupported capability, timeout, or opted-in schema preflight. */
 	async streamRequest<Output = unknown>(
 		peer: string,
 		capability: string,
 		payload: unknown,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; validate?: boolean },
 	): Promise<StreamResponse<Output>> {
+		const sent = opts?.validate
+			? await this.preflightInput(peer, capability, payload)
+			: payload;
 		const taskId = randomId();
 		let resolveResult!: (output: Output) => void;
 		let rejectResult!: (error: Error) => void;
@@ -444,7 +574,7 @@ export class AgxClient {
 			this.log,
 		);
 		try {
-			const { result } = await this.sendRequest<Output>(peer, capability, payload, {
+			const { result } = await this.sendRequest<Output>(peer, capability, sent, {
 				...opts,
 				taskId,
 				supportsInput: true,
@@ -914,11 +1044,13 @@ export class AgxClient {
 			this.transportRetained = true;
 		}
 		if (opts?.advertise !== false && this.transport.advertise) {
+			const skills = this.typedSkills();
 			await this.transport
 				.advertise(this.capabilities(), {
 					org: this.identity?.org,
 					nip05: this.identity?.nip05,
 					payloadTypes: [DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE],
+					...(skills.length > 0 ? { skills } : {}),
 				})
 				.catch((e) =>
 					this.log.warn?.("AGX: advertise failed", {
@@ -1125,12 +1257,14 @@ export class AgxClient {
 			await this.onMessage?.(msg);
 			return;
 		}
-		const handler = this.handlers.get(env.capability);
-		if (!handler) {
+		const registered = this.handlers.get(env.capability);
+		if (!registered) {
 			// Unreachable — dispatchMessage only routes here when a handler exists.
 			// Guard defensively and, crucially, do NOT auto-reply.
 			return;
 		}
+		// Refuse a reused active task id before validating its payload, so a
+		// duplicate never answers for (or terminates) the task already running.
 		const peer = this.normalizeId(msg.from);
 		const activeTaskKey = this.activeInboundTaskKey(peer, env.taskId);
 		if (this.activeInboundTasks.has(activeTaskKey)) {
@@ -1139,6 +1273,25 @@ export class AgxClient {
 				from: msg.from,
 			});
 			return;
+		}
+		if (registered.contract?.inputSchema) {
+			const problem = validateAgxJsonPayload(
+				registered.contract.inputSchema,
+				env.payload,
+			);
+			if (problem) {
+				this.log.info?.("AGX: task input failed schema validation", {
+					taskId: env.taskId,
+					capability: env.capability,
+					from: msg.from,
+					error: problem,
+				});
+				await this.sendResult(msg.from, env.taskId, {
+					status: "failed",
+					error: "invalid_input",
+				});
+				return;
+			}
 		}
 		this.activeInboundTasks.set(activeTaskKey, {
 			canceled: false,
@@ -1168,7 +1321,7 @@ export class AgxClient {
 					this.runTask(
 						msg,
 						env,
-						handler,
+						registered,
 						task,
 						onInputRequired,
 						releaseSlot,
@@ -1310,7 +1463,7 @@ export class AgxClient {
 	private async runTask(
 		msg: AgxIncomingMessage,
 		env: TaskRequestEnvelope,
-		handler: TaskHandler,
+		registered: RegisteredTaskHandler,
 		task: Task,
 		onInputRequired: () => void,
 		releaseSlot: () => void,
@@ -1326,7 +1479,7 @@ export class AgxClient {
 		let waitingForInput = false;
 		try {
 			if (active?.canceled) return;
-			const output = await handler(task, {
+			const output = await registered.handler(task, {
 				from: msg.from,
 				capability: env.capability,
 				eventId: msg.eventId,
@@ -1407,9 +1560,33 @@ export class AgxClient {
 				},
 			});
 			if (active?.canceled) return;
+			let resultOutput: unknown = output;
+			if (registered.contract?.outputSchema) {
+				const wire = agxWireJson(output);
+				const problem = wire.ok
+					? validateAgxJsonPayload(
+							registered.contract.outputSchema,
+							wire.value,
+						)
+					: `$: ${wire.problem}`;
+				if (!wire.ok || problem) {
+					this.log.warn?.("AGX: task output failed schema validation", {
+						taskId: env.taskId,
+						capability: env.capability,
+						error: problem,
+					});
+					await this.sendResult(msg.from, env.taskId, {
+						status: "failed",
+						error: "invalid_output",
+					});
+					return;
+				}
+				// Send the value that was checked, not a second encoding of it.
+				resultOutput = wire.value;
+			}
 			await this.sendResult(msg.from, env.taskId, {
 				status: "completed",
-				output,
+				output: resultOutput,
 			});
 		} catch (err) {
 			if (err instanceof AgxTaskCanceled || active?.canceled) {
