@@ -35,6 +35,7 @@ export async function sendCommand(
 		profile,
 		identity,
 		makeLogger(options.verbose ?? false),
+		{ profileName },
 	);
 
 	const res = await transport.publishMessage(to, {
@@ -183,6 +184,7 @@ export async function requestCommand(
 		profile,
 		identity,
 		makeLogger(options.verbose ?? false),
+		{ profileName },
 	);
 	const client = new AgxClient({
 		transport,

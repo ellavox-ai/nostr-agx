@@ -206,6 +206,49 @@ silently. `--allow-all` opts out explicitly.
 
 ---
 
+## Route relay WebSockets over Tailscale (opt-in)
+
+Tailscale is transport-only. The CLI starts a bundled tsnet node from
+`@nostr-agx/tailscale`, gets a loopback SOCKS5 proxy, and passes it to
+`NostrTransport` as `relayProxy`. No installed `tailscale` command,
+`tailscale serve` rule, tailnet URL adoption, Funnel or port forwarding is
+needed; Nostr remains the transport and nothing is exposed publicly.
+
+```bash
+printf %s "$TS_AUTHKEY" | agx tailscale enable --auth-key-stdin
+agx serve
+```
+
+Or configure an OAuth service instead of a key:
+
+```bash
+printf %s "$CLIENT_SECRET" | agx tailscale enable \
+  --oauth-url https://api.tailscale.com/api/v2/oauth/token \
+  --oauth-client-id "$CLIENT_ID" \
+  --oauth-client-secret-stdin \
+  --oauth-scope auth_keys
+```
+
+`enable` briefly starts and stops the proxy to verify the credentials;
+long-running commands start and own their own proxy. `--tailscale` and
+`--without-tailscale` on `relay`, `gateway`, and `serve` override the profile's
+opt-in for one run. `agx tailscale status` shows readiness without ever printing
+a key; `agx tailscale disable --forget` turns the opt-in off and deletes the
+stored secrets. Auth material lives in
+`~/.agx/profiles/<name>/tailscale.json` (mode `0600`), never in `config.json`,
+and the key reaches the launcher through its environment, never argv.
+
+Each run uses a fresh ephemeral tsnet state dir so a one-off key's tags are
+applied. Use `--state-dir <path>` to keep state across runs.
+
+See [docs/tailscale.md](../../docs/tailscale.md) for prerequisites, ACL example,
+the full command reference, and troubleshooting. For applications that create
+their own `NostrTransport` instead of using the CLI,
+[`@nostr-agx/tailscale`](../tailscale/README.md) provides the same programmatic
+tsnet SOCKS5 `relayProxy`.
+
+---
+
 ## Plugging in a real runtime
 
 `--handler` points `serve` at a module that default-exports capability
@@ -707,6 +750,7 @@ not remove an abandoned login lock.
 | `agx ui [--port n] [--no-open] [--compose <draft.json>] [--drafts <dir>]` | a local browser UI for your conversations (see [Local UI](#local-ui)) |
 | `agx gateway` / `agx gateway key new \| list \| revoke` | the agent behind an HTTP API with signed webhooks, for n8n Cloud and other HTTP tools (see [`agx gateway`](#behind-an-http-api-agx-gateway)) |
 | `agx relay` | a local NIP-01 relay |
+| `agx tailscale enable \| up \| serve \| status \| disable` | opt-in tailnet reachability for the local relay/gateway (`--auth-key-stdin` or OAuth; see [Tailscale](#reach-the-relay-over-tailscale-opt-in)) |
 | `agx doctor` | preflight |
 | `agx doctor --local` | preflight of the local exchange only: permissions, identity, relays, allowlist; skips the hosted index and login |
 

@@ -120,7 +120,7 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 			onError: (error) => warn(`A message could not be stored and will be retried: ${error instanceof Error ? error.message : String(error)}`),
 		});
 
-		const transport = await createTransport(profile, identity, logger);
+		const transport = await createTransport(profile, identity, logger, { profileName });
 		const client = new AgxClient({
 			transport,
 			seen,

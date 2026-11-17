@@ -160,7 +160,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 				if (options.devStore) {
 					return { ok: false, detail: "Sending is off with --dev-store." };
 				}
-				const transport = await createTransport(profile, identity, makeLogger(options.verbose ?? false));
+				const transport = await createTransport(profile, identity, makeLogger(options.verbose ?? false), { profileName });
 				const res = await transport.publishMessage(toHexPubkey(to, "recipient"), {
 					text: body,
 					subject: subject ?? null,

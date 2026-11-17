@@ -1,14 +1,26 @@
 import kleur from "kleur";
+import {
+	effectiveProfile,
+	resolveProfileName,
+} from "../lib/config.js";
 import { heading, info, kv, say, warn } from "../lib/output.js";
+import {
+	startTailscaleForProfile,
+	tailscaleRequested,
+} from "../lib/tailscale/index.js";
 import { ensureRelayCert, writeRelayMeta } from "../relay/cert.js";
 import { startRelay } from "../relay/server.js";
 
 export interface RelayOptions {
+	profile?: string;
 	port?: string;
 	verbose?: boolean;
 	tls?: boolean;
 	tlsPort?: string;
 	regenerateCert?: boolean;
+	/** `--tailscale` / `--without-tailscale`; config is the opt-in default. */
+	tailscale?: boolean;
+	withoutTailscale?: boolean;
 }
 
 const KIND_NAMES: Record<number, string> = {
@@ -58,10 +70,29 @@ export async function relayCommand(options: RelayOptions): Promise<void> {
 		startedAt: new Date().toISOString(),
 	});
 
+	// Opt-in: the Nostr relay is unchanged. The SDK's bundled tsnet node gives
+	// this process a loopback SOCKS5 proxy for relay WebSockets; no tailnet
+	// service, public listener or installed `tailscale` command is involved.
+	// A Tailscale failure must not take the local relay down with it.
+	const profileName = resolveProfileName(options.profile);
+	const profile = effectiveProfile(profileName);
+	let tailscaleProxy: Awaited<ReturnType<typeof startTailscaleForProfile>> | null = null;
+	let tailnetProblem: string | null = null;
+	if (tailscaleRequested(profile, options)) {
+		try {
+			tailscaleProxy = await startTailscaleForProfile(profileName, profile);
+		} catch (error) {
+			tailnetProblem = error instanceof Error ? error.message : String(error);
+		}
+	}
+
 	heading("agx relay");
 	kv("listening", relay.addresses.join(", "));
 	kv("CLI transport", `ws://127.0.0.1:${relay.port}`);
 	kv("wss:// form", `wss://localhost:${relay.port}`);
+	if (tailscaleProxy) {
+		kv("tailscale relay proxy", tailscaleProxy.url);
+	}
 	if (cert && relay.tlsPort) {
 		kv("real TLS", `wss://localhost:${relay.tlsPort}`);
 		kv("certificate", cert.certPath);
@@ -70,6 +101,18 @@ export async function relayCommand(options: RelayOptions): Promise<void> {
 	info(
 		"The wss:// form is for indexes that only accept wss:// relays. The plain port has no TLS, so a client must downgrade it to ws:// (for localhost only).",
 	);
+	if (tailnetProblem) {
+		say("");
+		warn(`Tailscale proxy failed, so only the local relay is available: ${tailnetProblem}`);
+		info(
+			"Fix the profile with `agx tailscale status`, then restart with `agx relay --tailscale`.",
+		);
+	} else if (tailscaleProxy) {
+		say("");
+		info(
+			"Clients with Tailscale enabled route their relay WebSockets through the proxy above. The relay itself is unchanged; no public listener was opened.",
+		);
+	}
 
 	if (cert && relay.tlsPort) {
 		say("");
@@ -111,7 +154,10 @@ export async function relayCommand(options: RelayOptions): Promise<void> {
 	await new Promise<void>((resolve) => {
 		const stop = () => {
 			say("");
-			void relay.close().then(resolve);
+			void (async () => {
+				await tailscaleProxy?.stop();
+				await relay.close();
+			})().then(resolve);
 		};
 		process.on("SIGINT", stop);
 		process.on("SIGTERM", stop);

@@ -40,6 +40,8 @@ import { dirname, join } from "node:path";
  *                                         with their signing secrets
  *     profiles/<name>/gateway-task-operations.json
  *                                         idempotent and background task operations and outcomes
+ *     profiles/<name>/tailscale.json       opt-in Tailscale auth key / OAuth client secret
+ *                                         (only when `agx tailscale enable` stored one)
  */
 
 export function agxHome(): string {
@@ -95,6 +97,11 @@ export function gatewaySubscriptionsPath(profile: string): string {
 /** Idempotent task submissions and their retained outcomes. */
 export function gatewayTaskOperationsPath(profile: string): string {
 	return join(profileDir(profile), "gateway-task-operations.json");
+}
+
+/** Tailscale auth material for this profile, kept out of `config.json`. */
+export function tailscaleSecretsPath(profile: string): string {
+	return join(profileDir(profile), "tailscale.json");
 }
 
 export function ensureDir(dir: string): void {

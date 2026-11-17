@@ -39,6 +39,53 @@ export const DEFAULT_API_BASE_URL = "https://app.ellaworks.ai";
  * by `agx login` only; every other command keeps using what is stored. */
 export const LEGACY_DEFAULT_API_BASE_URL = "http://localhost:3000";
 
+/**
+ * Opt-in Tailscale integration for this profile. Tailscale is transport-only:
+ * `@nostr-agx/tailscale` starts a bundled tsnet node and its loopback SOCKS5
+ * proxy, and `NostrTransport` routes relay WebSockets through that proxy. No
+ * `tailscale` command is installed or required, and no tailnet relay URL is
+ * derived or adopted.
+ *
+ * Nothing here is used unless `enabled` is true (or a command passes
+ * `--tailscale`). Secrets are never stored in `config.json`; see
+ * `loadTailscaleSecret` in lib/tailscale/credentials.ts.
+ */
+export const tailscaleOAuthSchema = z.object({
+	/** The OAuth service to ask for a key. Tailscale's own client-credentials
+	 * endpoint is the default; a custom authentication service may return an
+	 * `authKey` directly instead. */
+	tokenUrl: z.string().default("https://api.tailscale.com/api/v2/oauth/token"),
+	/** How the client secret is presented to the token endpoint. Tailscale's
+	 * documentation uses HTTP Basic; a custom service may want it in the form. */
+	tokenAuth: z.enum(["basic", "post"]).default("basic"),
+	clientId: z.string().nullable().default(null),
+	scope: z.string().nullable().default(null),
+	/** Tailscale tailnet, or `-` for the default tailnet. */
+	tailnet: z.string().default("-"),
+	/** Only used when the OAuth service returns an access token instead of an
+	 * auth key: the Tailscale API that mints one. */
+	apiBaseUrl: z.string().default("https://api.tailscale.com/api/v2"),
+	/** Optional tags for a minted auth key. They must exist in the tailnet ACL. */
+	tags: z.array(z.string()).default([]),
+});
+
+export const tailscaleProfileSchema = z.object({
+	enabled: z.boolean().default(false),
+	/** Hostname to request for the tsnet node. Defaults to `agx-<profile>`. */
+	hostname: z.string().nullable().default(null),
+	/** `key`: use a Tailscale auth key. `oauth`: ask the configured service. */
+	authMode: z.enum(["key", "oauth"]).default("key"),
+	oauth: tailscaleOAuthSchema.prefault({}),
+	/**
+	 * tsnet state directory. Left null by default so every run enrolls a fresh
+	 * ephemeral node and a one-off key's tags are actually applied; tsnet ignores
+	 * an auth key when it finds an already-enrolled node in its state.
+	 */
+	stateDir: z.string().nullable().default(null),
+	/** Register ephemeral nodes. Defaults to true. */
+	ephemeral: z.boolean().default(true),
+});
+
 export const profileSchema = z.object({
 	apiBaseUrl: z.string().default(DEFAULT_API_BASE_URL),
 	/** 0.3 kept the API key here. 0.4 never writes one; a stored one is still
@@ -53,6 +100,8 @@ export const profileSchema = z.object({
 	/** Hex pubkeys this agent will accept task requests from. Default-deny: an
 	 * empty list means nobody, which is the SPEC's required posture. */
 	allow: z.array(z.string()).default([]),
+	/** Opt-in Tailscale reachability. See tailscaleProfileSchema. */
+	tailscale: tailscaleProfileSchema.prefault({}),
 });
 
 export type Profile = z.infer<typeof profileSchema>;
@@ -210,6 +259,19 @@ export function effectiveProfile(name: string): Profile {
 		relays: process.env.AGX_RELAY
 			? process.env.AGX_RELAY.split(",").map((r) => r.trim())
 			: stored.relays,
+		tailscale: {
+			...stored.tailscale,
+			// Per-run opt-in/out, without rewriting the profile.
+			enabled:
+				process.env.AGX_TAILSCALE === "1" || process.env.AGX_TAILSCALE === "true"
+					? true
+					: process.env.AGX_TAILSCALE === "0" ||
+							process.env.AGX_TAILSCALE === "false"
+						? false
+						: stored.tailscale.enabled,
+			hostname: process.env.AGX_TAILSCALE_HOSTNAME ?? stored.tailscale.hostname,
+			stateDir: process.env.AGX_TAILSCALE_STATE_DIR ?? stored.tailscale.stateDir,
+		},
 	};
 }
 
