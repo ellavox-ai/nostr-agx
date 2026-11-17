@@ -17,7 +17,7 @@ import {
 	toNpub,
 } from "@nostr-agx/nostr";
 import type { NewOutboundMessage } from "../store/types.js";
-import { ApiError, integer, isRecord, text } from "./http.js";
+import { ApiError, integer, isRecord, mayHoldSecretKey, text } from "./http.js";
 import type { Requester } from "./requester.js";
 
 /**
@@ -56,9 +56,25 @@ function peerOf(value: unknown): string {
 	const input = text(value).trim();
 	const hex = normalizePubkey(input);
 	if (!hex) {
-		throw new ApiError(400, "invalid_peer", `The agent must be an npub1… key or a 64-character hex public key, not "${input}"`);
+		const shown = mayHoldSecretKey(input) ? "a secret key (nsec1…), which is not shown here" : `"${input}"`;
+		throw new ApiError(400, "invalid_peer", `The agent must be an npub1… key or a 64-character hex public key, not ${shown}`);
 	}
 	return hex;
+}
+
+/**
+ * A capability is a name such as `invoice.review`. It goes to the other agent
+ * inside the request and onto the Agent Card, so a pasted secret key is refused
+ * here, before anything is sent, and is never repeated.
+ */
+function refuseSecretCapability(capability: string): void {
+	if (mayHoldSecretKey(capability)) {
+		throw new ApiError(
+			400,
+			"invalid_request",
+			"The capability must be a name such as invoice.review, not a secret key (nsec1…), which is not shown here",
+		);
+	}
 }
 
 function messageOf(error: unknown): string {
@@ -83,6 +99,7 @@ export function parseTaskRequest(input: unknown): TaskRequest {
 	if (!capability) {
 		throw new ApiError(400, "invalid_request", "Capability is empty");
 	}
+	refuseSecretCapability(capability);
 	if (capability.length > MAX_CAPABILITY_CHARS) {
 		throw new ApiError(400, "invalid_request", `Capability names can be at most ${MAX_CAPABILITY_CHARS} characters`);
 	}
@@ -196,6 +213,13 @@ export async function sendMessage(deps: OperationDeps, input: unknown): Promise<
 		perPeerPerHour: integer(req.maxPerHour, "maxPerHour", DEFAULT_AUTO_REPLY_LIMITS.perPeerPerHour, { min: 1, max: 1_000_000 }),
 	};
 	const contextId = text(req.contextId).trim() || randomId();
+	if (mayHoldSecretKey(contextId)) {
+		throw new ApiError(
+			400,
+			"invalid_request",
+			"The conversation ID must be a short id, not a secret key (nsec1…), which is not shown here",
+		);
+	}
 	if (contextId.length > MAX_CONTEXT_ID) {
 		throw new ApiError(400, "invalid_request", `Conversation ID is longer than ${MAX_CONTEXT_ID} characters`);
 	}
@@ -275,6 +299,8 @@ export async function readCard(
 	query: URLSearchParams,
 ): Promise<Record<string, unknown>> {
 	const peer = peerOf(peerInput);
+	const capability = (query.get("capability") ?? "").trim();
+	refuseSecretCapability(capability);
 	const [{ card, reachable }, relays] = await Promise.all([
 		resolvePeerCardWithStatus(peer, deps.relays, deps.signer),
 		resolvePeerRelays(peer, deps.relays, deps.signer).catch(() => [] as string[]),
@@ -289,7 +315,6 @@ export async function readCard(
 	}
 	const nip05Verified =
 		card?.nip05 && query.get("verifyNip05") !== "false" ? await verifyNip05(card.nip05, peer) : null;
-	const capability = (query.get("capability") ?? "").trim();
 	return {
 		npub: toNpub(peer),
 		pubkey: peer,

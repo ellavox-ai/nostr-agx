@@ -2,7 +2,7 @@ import { createApiClient, toCliError } from "../lib/api.js";
 import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, usageError } from "../lib/errors.js";
 import { heading, info, json, kv, ok, say, table } from "../lib/output.js";
-import { toDisplayNpub } from "../lib/peer.js";
+import { refuseSecretKey, toDisplayNpub } from "../lib/peer.js";
 
 /**
  * The team-side trust controls, driven over the same public HTTP API.
@@ -84,6 +84,8 @@ export async function peersAllowlistCommand(
 			"agx peers allowlist --team <id> --npub npub1…",
 		);
 	}
+	// The value goes to the remote index as typed. A secret key must not be sent there.
+	refuseSecretKey(options.npub, "peer");
 	let result: { status: string; pubkey: string };
 	try {
 		result = await client.exchange.allowlistPeer({

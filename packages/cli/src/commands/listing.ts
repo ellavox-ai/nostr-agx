@@ -24,6 +24,7 @@ import {
 	table,
 	warn,
 } from "../lib/output.js";
+import { refuseSecretKey } from "../lib/peer.js";
 import { relaysForListing } from "../lib/relays.js";
 import { runtime } from "../lib/runtime.js";
 import { loadState, updateState } from "../lib/state.js";
@@ -162,6 +163,11 @@ export async function listingCreateCommand(
 			"Pass exactly one of --team or --pubkey.",
 			"A listing addresses either a team the index holds a key for, or an external key you hold:\n    agx listing create --team <teamId>  --slug <slug> --display-name <name>\n    agx listing create --pubkey <npub>  --slug <slug> --display-name <name>\n  For an external key, `agx register` is easier — it proves possession first, which is required.",
 		);
+	}
+
+	// The key goes to the remote index as typed. A secret key must not be sent there.
+	if (options.pubkey) {
+		refuseSecretKey(options.pubkey, "pubkey");
 	}
 
 	// Only an EXTERNAL listing carries its own relays; a team listing advertises

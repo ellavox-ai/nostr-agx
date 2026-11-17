@@ -26,7 +26,7 @@ import { createTransport } from "../transport.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
-import { ApiError, readJson, sendError, sendJson } from "./http.js";
+import { ApiError, readJson, sendError, sendJson, shown } from "./http.js";
 import { parseIdempotencyKey, TaskOperationStore } from "./idempotency.js";
 import { verifyGatewayKey } from "./keys.js";
 import { type OperationDeps, parseTaskRequest, readCard, runTaskRequest, sendMessage } from "./operations.js";
@@ -482,7 +482,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				return;
 			}
 			if (!path.startsWith("/v1/")) {
-				throw new ApiError(404, "not_found", `No route for ${method} ${path}`);
+				throw new ApiError(404, "not_found", `No route for ${method} ${shown(path)}`);
 			}
 			const keyId = verifyGatewayKey(name, bearer(req));
 			if (keyId === null) {
@@ -596,14 +596,14 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				if (method === "GET") {
 					const subscription = subscriptions.get(id);
 					if (!subscription) {
-						throw new ApiError(404, "not_found", `No subscription ${id}`);
+						throw new ApiError(404, "not_found", `No subscription ${shown(id)}`);
 					}
 					sendJson(res, 200, viewOf(subscription));
 					return;
 				}
 				if (method === "DELETE") {
 					if (!subscriptions.delete(id)) {
-						throw new ApiError(404, "not_found", `No subscription ${id}`);
+						throw new ApiError(404, "not_found", `No subscription ${shown(id)}`);
 					}
 					advertise();
 					log(`UNSUB ${id}`);
@@ -612,7 +612,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					return;
 				}
 			}
-			throw new ApiError(404, "not_found", `No route for ${method} ${path}`);
+			throw new ApiError(404, "not_found", `No route for ${method} ${shown(path)}`);
 		};
 
 		const server: Server = createServer((req, res) => {
@@ -625,7 +625,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					sendError(res, error);
 					return;
 				}
-				log(`API error on ${req.method} ${req.url}: ${error instanceof Error ? error.message : String(error)}`);
+				log(`API error on ${req.method} ${shown(req.url ?? "")}: ${error instanceof Error ? error.message : String(error)}`);
 				sendError(res, new ApiError(500, "internal_error", "The gateway could not complete the request"));
 			});
 		});

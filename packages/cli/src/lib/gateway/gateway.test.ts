@@ -2,9 +2,12 @@ import { createHmac } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import { readdirSync, statSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { AgxClient, AgxPublicError, DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
 import { generateKeypair, localSigner, NostrTransport, toNpub } from "@nostr-agx/nostr";
+import { nip19 } from "nostr-tools";
+import { encrypt } from "nostr-tools/nip49";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type RunningRelay, startRelay } from "../../relay/server.js";
@@ -103,6 +106,18 @@ function api(path: string, init: RequestInit & { key?: string | null } = {}) {
 			...rest.headers,
 		},
 	});
+}
+
+/** True when `text` holds any 10-character stretch of the key's data part (not the constant `nsec1`), in any case. */
+function leaksKey(text: string, key: string): boolean {
+	const data = key.toLowerCase().slice(5);
+	const lower = text.toLowerCase();
+	for (let i = 0; i + 10 <= data.length; i++) {
+		if (lower.includes(data.slice(i, i + 10))) {
+			return true;
+		}
+	}
+	return false;
 }
 
 async function json(res: Response): Promise<Record<string, unknown>> {
@@ -306,6 +321,128 @@ describe("agx gateway: outbound", () => {
 		expect(body.error).toMatchObject({ code: "timeout" });
 		expect(String((body.error as { description: string }).description)).toContain("allowed this one");
 	}, 15_000);
+
+	it("refuses a secret key given as the agent, and neither repeats nor stores it", async () => {
+		const nsec = nip19.nsecEncode(generateKeypair().secretKey);
+		const leaks = (text: string) => leaksKey(text, nsec);
+		const calls = [
+			api("/v1/tasks", { method: "POST", body: JSON.stringify({ peer: nsec, capability: "x.y" }) }),
+			api("/v1/tasks", {
+				method: "POST",
+				headers: { "idempotency-key": "secret-as-agent" },
+				body: JSON.stringify({ peer: nsec, capability: "x.y", background: true }),
+			}),
+			api("/v1/messages", { method: "POST", body: JSON.stringify({ peer: nsec, text: "hello" }) }),
+			api(`/v1/agents/${nsec}`),
+		];
+		for (const res of await Promise.all(calls)) {
+			expect(res.status).toBe(400);
+			const text = await res.text();
+			expect(text).toContain("invalid_peer");
+			expect(leaks(text)).toBe(false);
+		}
+		// Nothing the gateway wrote to its profile holds the key either.
+		let scanned = 0;
+		for (const entry of readdirSync(box.home, { recursive: true, encoding: "utf8" })) {
+			const file = join(box.home, entry);
+			let content: string;
+			try {
+				if (!statSync(file).isFile()) {
+					continue;
+				}
+				content = readFileSync(file, "utf8");
+			} catch (error) {
+				// A temporary file the gateway renamed away between the listing and the read.
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					continue;
+				}
+				throw error;
+			}
+			scanned += 1;
+			expect(leaks(content), file).toBe(false);
+		}
+		expect(scanned).toBeGreaterThan(0);
+	});
+
+	it("does not repeat a secret key found in a request path, in an answer or in the gateway's log", async () => {
+		const nsec = nip19.nsecEncode(generateKeypair().secretKey);
+		const lines: string[] = [];
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), log: (line: string) => lines.push(line) });
+		try {
+			const calls = [
+				api(`/v1/agents/${nsec}`, { method: "POST" }), // the wrong method for that route
+				api(`/v1/agent/${nsec}`), // a typo in the route
+				api(`/agents/${nsec}`, { key: null }), // outside /v1/, answered before any key is checked
+				api(`/v1/subscriptions/${nsec}`),
+				api(`/v1/subscriptions/${nsec}`, { method: "DELETE" }),
+				api(`/v1/agents/${nsec}%zz`), // a bad percent escape: decoding it throws
+				api(`/v1/agents/${nsec}`), // the route that is handled
+			];
+			for (const res of await Promise.all(calls)) {
+				expect(res.status).toBeGreaterThanOrEqual(400);
+				expect(leaksKey(await res.text(), nsec)).toBe(false);
+			}
+			// The log sink is live: the bad escape is the one answer the gateway writes to its log.
+			expect(lines.some((line) => line.startsWith("API error"))).toBe(true);
+			expect(leaksKey(lines.join("\n"), nsec)).toBe(false);
+		} finally {
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 30_000);
+
+	it("does not repeat an encrypted secret key (ncryptsec1…) given as the agent or found in a request path, in an answer, in the gateway's log or in its files", async () => {
+		// A NIP-49 string made from a throwaway key (scrypt cost 2^4: fast, and no more real than the key).
+		const ncryptsec = encrypt(generateKeypair().secretKey, "throwaway-password", 4);
+		const lines: string[] = [];
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), log: (line: string) => lines.push(line) });
+		try {
+			const calls = [
+				api("/v1/tasks", { method: "POST", body: JSON.stringify({ peer: ncryptsec, capability: "x.y" }) }),
+				api("/v1/messages", { method: "POST", body: JSON.stringify({ peer: ncryptsec, text: "hello" }) }),
+				api(`/v1/agents/${ncryptsec}`), // the route that is handled: 400 invalid_peer
+				api(`/v1/agents/${ncryptsec}`, { method: "POST" }), // the wrong method for that route
+				api(`/v1/agent/${ncryptsec}`), // a typo in the route
+				api(`/agents/${ncryptsec}`, { key: null }), // outside /v1/, answered before any key is checked
+				api(`/v1/subscriptions/${ncryptsec}`),
+				api(`/v1/subscriptions/${ncryptsec}`, { method: "DELETE" }),
+				api(`/v1/agents/${ncryptsec}%zz`), // a bad percent escape: decoding it throws
+			];
+			for (const res of await Promise.all(calls)) {
+				expect(res.status).toBeGreaterThanOrEqual(400);
+				expect(leaksKey(await res.text(), ncryptsec)).toBe(false);
+			}
+			// The log sink is live: the bad escape is the one answer the gateway writes to its log.
+			expect(lines.some((line) => line.startsWith("API error"))).toBe(true);
+			expect(leaksKey(lines.join("\n"), ncryptsec)).toBe(false);
+			// Nothing the gateway wrote to its profile holds the key either.
+			let scanned = 0;
+			for (const entry of readdirSync(box.home, { recursive: true, encoding: "utf8" })) {
+				const file = join(box.home, entry);
+				let content: string;
+				try {
+					if (!statSync(file).isFile()) {
+						continue;
+					}
+					content = readFileSync(file, "utf8");
+				} catch (error) {
+					// A temporary file the gateway renamed away between the listing and the read.
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+						continue;
+					}
+					throw error;
+				}
+				scanned += 1;
+				expect(leaksKey(content, ncryptsec), file).toBe(false);
+			}
+			expect(scanned).toBeGreaterThan(0);
+		} finally {
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 30_000);
 
 	it("sends a message the peer can read, and bounds automated replies", async () => {
 		const reader = await peer();
