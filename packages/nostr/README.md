@@ -45,4 +45,28 @@ non-Node bundle doesn't fail to resolve them, but where DNS is unavailable (brow
 **fails closed** — hostname destinations are rejected (literal IPs are still vetted). Run it in a
 Node runtime (`export const runtime = "nodejs"` on Next.js), not the edge runtime.
 
+## Private relays (SOCKS5, opt-in)
+
+`NostrTransport` can dial relays through a SOCKS5 proxy with the `relayProxy` field. It accepts a
+URL, a `{ url, stop() }` handle, or a lazy resolver:
+
+```ts
+const transport = await NostrTransport.create({
+  signer,
+  relays: ["wss://relay.private.ts.net"],
+  ws: WebSocket,
+  relayProxy: "socks5://127.0.0.1:1080",
+});
+```
+
+A bare URL is borrowed — the transport leaves it running and can be restarted. A handle is owned —
+`transport.stop()` closes it, and that transport cannot be restarted.
+
+Proxy routing needs an explicit WebSocket implementation (`ws` in Node), because the global WHATWG
+WebSocket has no socket/agent options. Hostnames are resolved by the proxy (`socks5h` semantics).
+
+For a tailnet, install [`@nostr-agx/tailscale`](../tailscale/README.md): it starts a
+local tsnet node, supplies composable auth-key providers (direct, env, OAuth, custom), and returns a
+`relayProxy` value that hands the node's lifecycle to the transport.
+
 > Status: **0.2.0 (draft)** — tracks the NIP-AGX spec in `@nostr-agx/core`'s `SPEC.md`.

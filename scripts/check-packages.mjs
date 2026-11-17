@@ -20,6 +20,7 @@ const root = resolve(import.meta.dirname, "..");
 const REQUIRED = {
 	core: ["package.json", "README.md", "LICENSE", "LICENSE-SPEC", "SPEC.md"],
 	nostr: ["package.json", "README.md", "LICENSE"],
+	tailscale: ["package.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
 	cli: ["package.json", "README.md", "LICENSE"],
 	"n8n-nodes-agx": ["package.json", "README.md", "LICENSE"],
 	"n8n-nodes-agx-gateway": ["package.json", "README.md", "LICENSE"],
@@ -50,6 +51,14 @@ try {
 		}
 		if (![...files].some((f) => f.startsWith("dist/"))) {
 			problems.push(`${tarball}: no dist/ (run pnpm build first)`);
+		}
+		if (dir === "tailscale") {
+			const platform = `${process.platform}-${process.arch}`;
+			const exe = process.platform === "win32" ? "agx-tailscale.exe" : "agx-tailscale";
+			const bundled = `bin/${platform}/${exe}`;
+			if (!files.has(bundled)) {
+				problems.push(`${tarball}: missing bundled launcher ${bundled}`);
+			}
 		}
 		const manifest = spawnSync(
 			"tar",

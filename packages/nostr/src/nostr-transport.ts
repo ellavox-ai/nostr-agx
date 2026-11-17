@@ -51,6 +51,14 @@ import {
 	type RelayFailureKind,
 } from "./relay-pool";
 import {
+	createProxyWebSocket,
+	isBorrowedRelayProxy,
+	type RelayProxyHandle,
+	type RelayProxyInput,
+	RelayProxyError,
+	resolveRelayProxy,
+} from "./relay-proxy";
+import {
 	type AgxSigner,
 	type AgxSignerUnavailableError,
 	isSignerUnavailable,
@@ -68,6 +76,16 @@ export interface NostrTransportConfig {
 	ws?: WebSocketImpl;
 	/** Optional logger (default no-op). */
 	logger?: AgxLogger;
+	/**
+	 * Route relay WebSockets through a SOCKS5 proxy: a URL, a started handle
+	 * (whose `stop()` this transport will call), or a lazy resolver.
+	 *
+	 * Opt-in and transport-only — the exchange stays plain Nostr. A bare URL is
+	 * borrowed (the transport leaves it running); a handle is owned (the
+	 * transport stops it). For Tailscale, `@nostr-agx/tailscale`
+	 * provides `tailscaleRelayProxy()` which returns a ready-made lazy resolver.
+	 */
+	relayProxy?: RelayProxyInput;
 }
 
 function nowSec(): number {
@@ -131,6 +149,10 @@ export class NostrTransport implements AgxTransport {
 	>();
 
 	private readonly ws?: WebSocketImpl | undefined;
+	/** The proxy this transport dials through, when one is configured. */
+	private relayProxy?: RelayProxyHandle;
+	/** Set once `stop()` has released the proxy, so a restart fails clearly. */
+	private proxyReleased = false;
 	private onMessageHandlers = new Set<(msg: AgxIncomingMessage) => void | Promise<void>>();
 	private onReceiptHandlers = new Set<(receipt: AgxIncomingReceipt) => void | Promise<void>>();
 	private messageListenerOptions = new Map<
@@ -149,15 +171,37 @@ export class NostrTransport implements AgxTransport {
 	 * synchronous (the `AgxTransport` contract) even for a remote signer. */
 	static async create(config: NostrTransportConfig): Promise<NostrTransport> {
 		const publicKey = await config.signer.getPublicKey();
-		return new NostrTransport(config, publicKey);
+		let proxy: RelayProxyHandle | undefined;
+		try {
+			proxy = await resolveRelayProxy(config.relayProxy);
+			const ws = proxy
+				? await createProxyWebSocket(proxy.url, config.ws)
+				: config.ws;
+			return new NostrTransport(config, publicKey, ws, proxy);
+		} catch (error) {
+			await proxy?.stop().catch(() => undefined);
+			throw error;
+		}
 	}
 
-	private constructor(config: NostrTransportConfig, publicKey: string) {
-		configureWebSocket(config.ws);
+	private constructor(
+		config: NostrTransportConfig,
+		publicKey: string,
+		ws: WebSocketImpl | undefined,
+		proxy: RelayProxyHandle | undefined,
+	) {
+		configureWebSocket(ws);
 		this.signer = config.signer;
 		this.publicKey = publicKey;
 		this.relays = config.relays;
 		this.logger = config.logger;
+		this.ws = ws;
+		this.relayProxy = proxy;
+	}
+
+	/** The SOCKS5 URL in use, if any. Useful for logs and diagnostics. */
+	get relayProxyUrl(): string | undefined {
+		return this.relayProxy?.url;
 	}
 
 	whoami(): string {
@@ -813,6 +857,12 @@ export class NostrTransport implements AgxTransport {
 		if (this.started) {
 			return;
 		}
+		if (this.proxyReleased) {
+			throw new RelayProxyError(
+				"This transport was stopped and its relay proxy was released.",
+				"Create a new NostrTransport, or start the proxy once and pass its URL as `relayProxy` to reuse it.",
+			);
+		}
 		if (this.startPromise) {
 			await this.startPromise;
 			return;
@@ -909,8 +959,29 @@ export class NostrTransport implements AgxTransport {
 		const subscriptions = this.subscriptions;
 		this.subscriptions = [];
 		this.closeSubscriptions(subscriptions);
+		// Release the network path last, after every subscription that could use
+		// it is closed. A borrowed URL points at a proxy someone else owns, so it
+		// is left running and this transport can start again; an owned handle is
+		// stopped, which makes this transport single-use.
+		const proxy = this.relayProxy;
+		let stopError: unknown;
+		if (proxy) {
+			const borrowed = isBorrowedRelayProxy(proxy);
+			if (!borrowed) {
+				this.relayProxy = undefined;
+				this.proxyReleased = true;
+			}
+			try {
+				await proxy.stop();
+			} catch (error) {
+				stopError = error;
+			}
+		}
 		if (startFailed) {
 			throw startError;
+		}
+		if (stopError) {
+			throw stopError;
 		}
 	}
 

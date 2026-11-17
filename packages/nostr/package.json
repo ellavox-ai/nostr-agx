@@ -50,9 +50,10 @@
 		"test:unit": "vitest run"
 	},
 	"dependencies": {
-		"@nostr-agx/core": "workspace:*",
 		"@noble/hashes": "2.0.1",
-		"nostr-tools": "^2.25.0"
+		"@nostr-agx/core": "workspace:*",
+		"nostr-tools": "^2.25.0",
+		"socks-proxy-agent": "^10.1.0"
 	},
 	"peerDependencies": {
 		"ws": "^8",
