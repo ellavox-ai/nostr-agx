@@ -2,6 +2,7 @@ import { AgxClient, DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
+import { neutralizeControls } from "../lib/inbound-lines.js";
 import { fail, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
@@ -89,7 +90,9 @@ export async function sendCommand(
 	recordSent(profileName, toDisplayNpub(to), message, options.subject ?? null, res.contextId ?? null, res.eventId);
 	ok(`Sent to ${toDisplayNpub(to)}`);
 	kv("event", res.eventId);
-	kv("contextId", res.contextId);
+	// Shown as text: the id may be what was typed after --context-id. The JSON
+	// below keeps it as typed, because a script reuses it (and json() escapes it).
+	kv("contextId", neutralizeControls(res.contextId));
 	kv("relays", `${res.accepted ?? "?"}/${res.total ?? "?"} accepted`);
 	// A refusal used to be invisible here: `1/2 accepted` printed in the same
 	// plain style as `2/2`, and the reason sat unread in `errors`. Name the
