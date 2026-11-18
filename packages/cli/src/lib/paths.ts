@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { configError } from "./errors.js";
 
 /**
  * Filesystem layout and the two rules that matter for a directory holding a
@@ -43,7 +44,20 @@ import { dirname, join } from "node:path";
  */
 
 export function agxHome(): string {
-	return process.env.AGX_HOME ?? join(homedir(), ".agx");
+	const home = process.env.AGX_HOME;
+	if (home === undefined) {
+		return join(homedir(), ".agx");
+	}
+	// Set but empty names no folder, and joining a file name onto it gives a path
+	// in whatever folder agx was started from. Stop, rather than fall back to
+	// ~/.agx: a script that meant a private folder should not land on the real one.
+	if (home.trim() === "") {
+		throw configError(
+			"AGX_HOME is set but empty (or only whitespace), so agx has no folder to keep your identity and keys in.",
+			"Set it to a folder, for example:\n    export AGX_HOME=/path/to/a/folder\n  or unset it to use ~/.agx:\n    unset AGX_HOME",
+		);
+	}
+	return home;
 }
 
 export function configPath(): string {
