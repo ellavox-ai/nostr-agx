@@ -183,12 +183,11 @@ export function getProfile(name: string): Profile {
 	return config.profiles[name] ?? { ...EMPTY_PROFILE };
 }
 
+/** Saving a profile never changes which profile is active: only `agx config use`
+ * does. A home nobody has chosen on stays on `default`. */
 export function saveProfile(name: string, profile: Profile): void {
 	const config = loadConfig();
 	config.profiles[name] = profile;
-	if (!config.profiles[config.currentProfile]) {
-		config.currentProfile = name;
-	}
 	saveConfig(config);
 }
 
