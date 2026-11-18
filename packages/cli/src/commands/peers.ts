@@ -2,7 +2,7 @@ import { createApiClient, toCliError } from "../lib/api.js";
 import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, usageError } from "../lib/errors.js";
 import { heading, info, json, kv, ok, say, table } from "../lib/output.js";
-import { refuseSecretKey, toDisplayNpub } from "../lib/peer.js";
+import { isPastedSecretKey, refuseSecretKey, toDisplayNpub } from "../lib/peer.js";
 
 /**
  * The team-side trust controls, driven over the same public HTTP API.
@@ -116,6 +116,13 @@ export async function peersDecideCommand(
 		throw usageError(
 			"--peer <peerId> is required.",
 			`Find it with:  agx peers list --team ${teamId}`,
+		);
+	}
+	// The id goes to the remote index as typed. A secret key must not be sent there.
+	if (isPastedSecretKey(options.peer)) {
+		throw usageError(
+			"The peer id you gave is a secret key (nsec1…), so it is not sent and not shown here.",
+			"Find the id with:  agx peers list --team <teamId>",
 		);
 	}
 	if (action === "refuse" && !options.reason) {
