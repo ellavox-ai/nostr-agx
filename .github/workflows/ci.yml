@@ -24,7 +24,15 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/tailscale/launcher/go.mod
+          cache-dependency-path: packages/tailscale/launcher/go.sum
       - run: pnpm install --frozen-lockfile
+      # bin/ is not checked in, so build the launchers the tests and
+      # check-packages need from the Go source pinned in go.mod.
+      - name: Stage bundled Tailscale launchers
+        run: make -C packages/tailscale/launcher stage
       - run: pnpm build
       - run: pnpm type-check
       - run: pnpm test
@@ -80,7 +88,9 @@ jobs:
       - name: Build deploy/gateway/Dockerfile from the CLI as it would be published
         run: |
           mkdir -p "$RUNNER_TEMP/agx-pkg"
-          (cd packages/cli && pnpm pack --pack-destination "$RUNNER_TEMP/agx-pkg")
+          # pnpm pack rewrites workspace:* to a plain version. Tailscale is not
+          # on npm yet, so serve its tarball too and point the CLI at it.
+          node scripts/prepare-gateway-package.mjs "$RUNNER_TEMP/agx-pkg"
           python3 -m http.server 8931 --bind 127.0.0.1 --directory "$RUNNER_TEMP/agx-pkg" &
           sleep 1
           version=$(node -p "require('./packages/cli/package.json').version")
