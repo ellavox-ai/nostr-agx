@@ -157,13 +157,11 @@ function isNonPublicAddress(
 		return isPrivateIPv4(address);
 	}
 	if (version === 6) {
-		const lower = address.toLowerCase();
-		if (lower.includes("::ffff:")) {
-			const mapped = lower.split("::ffff:").pop() ?? "";
-			if (mapped && isPrivateIPv4(mapped)) {
-				return true;
-			}
+		const mapped = mappedIPv4(address);
+		if (mapped !== null && isPrivateIPv4(mapped)) {
+			return true;
 		}
+		const lower = address.toLowerCase();
 		// Loopback in both compressed (`::1`) and fully-expanded (`0:0:…:1`) forms.
 		const isLoopback = lower === "::1" || /^(0+:){7}0*1$/.test(lower);
 		return (
@@ -176,6 +174,38 @@ function isNonPublicAddress(
 		);
 	}
 	return true;
+}
+
+/**
+ * The IPv4 address carried by an IPv4-mapped IPv6 address (::ffff:0:0/96), or
+ * null if `address` is not one. `address` must already be a valid IPv6 address
+ * (`isIP` returned 6). It reads the eight 16-bit groups, so the dotted form
+ * (`::ffff:127.0.0.1`), the hex form (`::ffff:7f00:1`), zero padding, capitals
+ * and any `::` abbreviation all give the same answer.
+ */
+function mappedIPv4(address: string): string | null {
+	// A zone id (`%eth0`) names an interface; it is not part of the address.
+	let text = address.replace(/%.*$/, "");
+	// A dotted tail stands for the last two groups.
+	const dotted = /^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+	if (dotted) {
+		const [a, b, c, d] = dotted.slice(2).map(Number);
+		text = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+	}
+	// `::` stands for as many zero groups as it takes to make eight.
+	const halves = text.split("::");
+	const head = halves[0] ? halves[0].split(":") : [];
+	const tail = halves[1] ? halves[1].split(":") : [];
+	const zeros = Array<string>(8 - head.length - tail.length).fill("0");
+	const groups = [...head, ...zeros, ...tail].map((g) =>
+		Number.parseInt(g, 16),
+	);
+	// ::ffff:0:0/96 is five zero groups, then ffff; the last two groups are the
+	// IPv4 address.
+	if (groups.slice(0, 5).some((g) => g !== 0) || groups[5] !== 0xffff) {
+		return null;
+	}
+	return `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`;
 }
 
 function isPrivateIPv4(addr: string): boolean {
