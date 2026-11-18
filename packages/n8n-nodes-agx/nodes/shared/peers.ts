@@ -1,4 +1,5 @@
 import { normalizePubkey } from "@nostr-agx/nostr";
+import { holdsSecretKey, refuseSecretCapability } from "./secrets";
 import { asText } from "./text";
 
 /** Lists in node parameters: entries separated by commas, spaces or new lines. */
@@ -16,7 +17,7 @@ export function parsePeer(input: unknown, label = "agent"): string {
 	const hex = normalizePubkey(text);
 	if (!hex) {
 		throw new Error(
-			`The ${label} must be an npub1… key or a 64-character hex public key, not "${text}".`,
+			`The ${label} must be an npub1… key or a 64-character hex public key, not ${holdsSecretKey(text) ? "a secret key (nsec1…), which is not shown here" : `"${text}"`}.`,
 		);
 	}
 	return hex;
@@ -33,7 +34,7 @@ export function parsePeerList(input: unknown): string[] {
 		if (hex) {
 			out.add(hex);
 		} else {
-			invalid.push(entry);
+			invalid.push(holdsSecretKey(entry) ? "(a secret key, not shown)" : entry);
 		}
 	}
 	if (invalid.length > 0) {
@@ -47,5 +48,7 @@ export function parsePeerList(input: unknown): string[] {
 /** Dot-namespaced capability keys (`invoice.review`), as the Agent Card
  * advertises them. */
 export function parseCapabilities(input: unknown): string[] {
-	return [...new Set(splitList(input))];
+	const capabilities = [...new Set(splitList(input))];
+	capabilities.forEach(refuseSecretCapability);
+	return capabilities;
 }

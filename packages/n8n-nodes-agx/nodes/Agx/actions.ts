@@ -25,6 +25,7 @@ import { type AgxIdentity, agxLogger } from "../shared/identity";
 import { MAX_WAIT_SEC, numberOption } from "../shared/numbers";
 import { asText } from "../shared/text";
 import { parsePeer } from "../shared/peers";
+import { refuseSecretCapability } from "../shared/secrets";
 import { Requester } from "../shared/requester";
 
 /** The largest `contextId` the AGX payload schema accepts. A longer one would
@@ -121,6 +122,7 @@ export async function requestTasks(
 				itemIndex: i,
 			});
 		}
+		refuseSecretCapability(capability);
 		const payload = parsePayload(ctx, ctx.getNodeParameter("payload", i, "{}"), i);
 		const options = ctx.getNodeParameter("options", i, {}) as {
 			checkCard?: boolean;
@@ -404,6 +406,8 @@ export async function getCards(
 			capability?: unknown;
 			verifyNip05?: boolean;
 		};
+		const capability = asText(options.capability).trim();
+		refuseSecretCapability(capability);
 		const [{ card, reachable }, relays] = await Promise.all([
 			resolvePeerCardWithStatus(peer, identity.relays, identity.signer),
 			resolvePeerRelays(peer, identity.relays, identity.signer).catch(
@@ -427,7 +431,6 @@ export async function getCards(
 			card?.nip05 && options.verifyNip05 !== false
 				? await verifyNip05(card.nip05, peer)
 				: null;
-		const capability = asText(options.capability).trim();
 		return {
 			npub: toNpub(peer),
 			pubkey: peer,

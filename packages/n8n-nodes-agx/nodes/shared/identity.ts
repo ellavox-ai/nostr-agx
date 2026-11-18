@@ -15,6 +15,7 @@ import type {
 } from "n8n-workflow";
 import { nip19 } from "nostr-tools";
 import WebSocket from "ws";
+import { shown } from "./secrets";
 
 /**
  * The agent identity behind an "AGX Agent Identity" credential: the signer, the
@@ -86,11 +87,11 @@ export function parseRelays(input: string): string[] {
 		}
 		const protocol = urlProtocol(entry);
 		if (protocol === null) {
-			throw new Error(`"${entry}" is not a relay URL.`);
+			throw new Error(`"${shown(entry)}" is not a relay URL.`);
 		}
 		if (protocol !== "wss:" && protocol !== "ws:") {
 			throw new Error(
-				`Relay URLs start with wss:// (or ws:// for a local relay): "${entry}"`,
+				`Relay URLs start with wss:// (or ws:// for a local relay): "${shown(entry)}"`,
 			);
 		}
 		if (!relays.includes(entry)) {

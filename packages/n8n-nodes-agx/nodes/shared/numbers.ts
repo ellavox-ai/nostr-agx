@@ -1,3 +1,5 @@
+import { shown } from "./secrets";
+
 /**
  * A numeric option, checked. n8n's `minValue` only constrains the editor: an
  * expression, or an AI Agent filling a tool parameter, can still hand over 0,
@@ -29,7 +31,7 @@ export function numberOption(
 		(range.integer === true && !Number.isInteger(n))
 	) {
 		throw new Error(
-			`${label} must be ${range.integer ? "a whole number" : "a number"} from ${range.min} to ${range.max}, not ${JSON.stringify(value)}`,
+			`${label} must be ${range.integer ? "a whole number" : "a number"} from ${range.min} to ${range.max}, not ${shown(JSON.stringify(value))}`,
 		);
 	}
 	return n;
