@@ -366,7 +366,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			} else {
 				say(
 					kleur.red(
-						`REPLY failed: ${(res.errors ?? []).join("; ") || "no relay accepted the event"}`,
+						`REPLY failed: ${neutralizeControls((res.errors ?? []).join("; ")) || "no relay accepted the event"}`,
 					),
 				);
 			}
