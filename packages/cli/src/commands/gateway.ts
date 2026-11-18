@@ -11,6 +11,7 @@ import {
 	revokeGatewayKey,
 } from "../lib/gateway/keys.js";
 import { SubscriptionStore } from "../lib/gateway/subscriptions.js";
+import { neutralizeControls } from "../lib/inbound-lines.js";
 import { heading, info, json, kv, say, table, warn } from "../lib/output.js";
 import { makeLogger } from "../lib/transport.js";
 
@@ -125,7 +126,7 @@ export function gatewayKeyListCommand(options: { profile?: string }): void {
 export function gatewayKeyRevokeCommand(id: string, options: { profile?: string }): void {
 	const profileName = resolveProfileName(options.profile);
 	if (!revokeGatewayKey(profileName, id)) {
-		throw new AgxCliError(`No gateway API key with id ${id}.`, {
+		throw new AgxCliError(`No gateway API key with id ${neutralizeControls(id)}.`, {
 			exitCode: EXIT.usage,
 			remediation: "List them with `agx gateway key list`.",
 		});
