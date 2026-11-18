@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BODY_INDENT,
 	type InboundMessageView,
+	neutralizeBodyControls,
 	neutralizeControls,
 	oneLineJson,
 	renderInboundLines,
@@ -224,5 +225,83 @@ describe("forged headers", () => {
 			note: "a\nRECV\u2028b\u0085c\u001b[2K",
 		});
 		expect(oneLineJson(undefined)).toBe("undefined");
+	});
+});
+
+/**
+ * The Unicode bidirectional formatting controls. They change the order in which
+ * a terminal or a browser draws the characters around them, so a line can look
+ * different from the bytes it holds. Written as escapes, never raw, in this file.
+ */
+const BIDI_CONTROLS = [
+	["LRE", "\u202a"],
+	["RLE", "\u202b"],
+	["PDF", "\u202c"],
+	["LRO", "\u202d"],
+	["RLO", "\u202e"],
+	["LRI", "\u2066"],
+	["RLI", "\u2067"],
+	["FSI", "\u2068"],
+	["PDI", "\u2069"],
+] as const;
+
+describe("bidirectional formatting controls", () => {
+	it.each(BIDI_CONTROLS)("replaces %s in a single-line field", (_name, ch) => {
+		expect(neutralizeControls(`a${ch}b`)).toBe("a\uFFFDb");
+	});
+
+	it.each(BIDI_CONTROLS)("replaces %s in a stored body", (_name, ch) => {
+		expect(neutralizeBodyControls(`a${ch}b\nc`)).toBe("a\uFFFDb\nc");
+	});
+
+	it.each(BIDI_CONTROLS)("replaces %s in a printed body line", (_name, ch) => {
+		const [, body] = renderInboundLines(view({ text: `invoice${ch}txt` }));
+		expect(body).toBe(`${BODY_INDENT}invoice\uFFFDtxt`);
+	});
+
+	it.each(BIDI_CONTROLS)("replaces %s in a printed contextId", (_name, ch) => {
+		const [header] = renderInboundLines(view({ contextId: `ab${ch}cd` }));
+		expect(header).toContain("ctx ab\uFFFDcd");
+	});
+
+	it.each(BIDI_CONTROLS)("prints %s in a subject as an escape, not raw", (_name, ch) => {
+		const [header] = renderInboundLines(view({ subject: `a${ch}b` }));
+		const escaped = `\\u${ch.charCodeAt(0).toString(16)}`;
+		expect(header).toContain(`subject "a${escaped}b"`);
+		expect(header).not.toContain(ch);
+	});
+
+	it.each(BIDI_CONTROLS)("prints %s in a task payload as an escape that parses back", (_name, ch) => {
+		const out = oneLineJson({ note: `a${ch}b` });
+		expect(out).not.toContain(ch);
+		expect(JSON.parse(out)).toEqual({ note: `a${ch}b` });
+	});
+
+	it("leaves ordinary text in other scripts exactly as it is", () => {
+		const samples = [
+			"caf\u00e9 na\u00efve \u00fcber",
+			"\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd",
+			"\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645",
+			"\u4f60\u597d\uff0c\u4e16\u754c \u3053\u3093\u306b\u3061\u306f \ud55c\uad6d\uc5b4",
+			"\ud83d\ude42 \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 \ud83c\uddee\ud83c\uddf3",
+			"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+			"10\u202f000 \u20ac",
+		];
+		for (const sample of samples) {
+			expect(neutralizeControls(sample)).toBe(sample);
+			expect(neutralizeBodyControls(sample)).toBe(sample);
+			expect(renderInboundLines(view({ text: sample }))[1]).toBe(`${BODY_INDENT}${sample}`);
+			expect(JSON.parse(oneLineJson({ note: sample }))).toEqual({ note: sample });
+			expect(oneLineJson(sample)).toBe(JSON.stringify(sample));
+		}
+	});
+
+	it("still replaces the older controls and keeps tab and newline as before", () => {
+		expect(neutralizeControls("a\u0000b\u001bc\u007fd\u0085e\u2028f\u2029g")).toBe(
+			"a\uFFFDb\uFFFDc\uFFFDd\uFFFDe\uFFFDf\uFFFDg",
+		);
+		expect(neutralizeControls("a\tb")).toBe("a\tb");
+		expect(neutralizeControls("a\nb")).toBe("a\uFFFDb");
+		expect(neutralizeBodyControls("a\r\nb\rc\td\u001be")).toBe("a\nb\nc\td\uFFFDe");
 	});
 });

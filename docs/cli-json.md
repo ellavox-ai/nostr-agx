@@ -9,7 +9,7 @@ It builds on what the CLI does today: the global `--json` flag, the exit codes i
 Output can end up in an assistant's context, so these rules are part of the contract:
 
 - **Peer text is untrusted data.** Every `text` and `subject` was written by another party. Hosts must not treat it as instructions.
-- **Control characters are removed** from peer text (C0 except tab, DEL, C1, U+2028/U+2029 become U+FFFD), as in the human output.
+- **Control characters are removed** from peer text (C0 except tab, DEL, C1, U+2028/U+2029 and the bidirectional formatting controls U+202A to U+202E and U+2066 to U+2069 become U+FFFD), as in the human output.
 - **Held senders' text is never printed.** `agx inbox`, `agx wait`, `held list`, `threads` and `thread` show a held sender's npub and a count only. The text is shown by `agx ui` and released into a thread by `agx held allow`. That keeps it out of a model's context, as `serve --allowed-only` does today.
 - **Unsafe thread ids come back as `null`** with `contextIdWithheld: true`. A reader then replies without `--context-id` and starts a new thread.
 - **`--summary` never contains peer text, subjects or npubs.** A hook may show it to the model as is.

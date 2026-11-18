@@ -74,10 +74,12 @@ export function kv(key: string, value: string | number | null): void {
 	say(`  ${kleur.dim(key.padEnd(16))} ${rendered}`);
 }
 
-const C1_AND_SEPARATORS_RE = /[\u007f-\u009f\u2028\u2029]/g;
+const C1_AND_SEPARATORS_RE = /[\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
-/** `JSON.stringify` escapes C0 controls but emits U+2028/U+2029/U+0085 and the
- * rest of C1 raw; escape those too so a quoted subject stays on one line. */
+/** `JSON.stringify` escapes C0 controls but emits U+2028/U+2029/U+0085, the
+ * rest of C1 and the bidirectional formatting controls (U+202A–U+202E,
+ * U+2066–U+2069) raw; escape those too so a quoted subject stays on one line
+ * and in the order it is written. */
 export function escapeLineBreakers(quoted: string): string {
 	return quoted.replace(
 		C1_AND_SEPARATORS_RE,
