@@ -8,6 +8,13 @@ import type { MessageStore } from "./store/message-store.js";
 import type { HoldResult, StoredMessage } from "./store/types.js";
 import { renderMessageLines } from "./threads.js";
 
+/**
+ * What a long-running reader says when it cannot read the saved allowlist. Fixed text: the entry
+ * may be a secret key pasted in by mistake, and a parse error can quote the file.
+ */
+export const ALLOWLIST_UNREADABLE =
+	"The allowlist cannot be read, so nobody is authorised and every sender's messages are held. They stay held after it is fixed: release a sender with `agx held allow <npub>`. Run `agx doctor --local` to see which entry is wrong.";
+
 export const INBOX_SCHEMA = "agx.inbox/1";
 export const INBOX_SUMMARY_SCHEMA = "agx.inbox.summary/1";
 

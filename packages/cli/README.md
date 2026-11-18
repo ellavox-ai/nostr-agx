@@ -253,6 +253,15 @@ your inbox), `agx held ignore <npub>` or `agx held block <npub>`. These work whi
 runs: it picks up the allowlist and the decision on its next poll. A kept message is capped at
 8,000 characters, all held text at 8 MiB (the oldest goes first) and 30 days.
 
+If the saved allowlist cannot be read while `serve` runs (an entry that is not an npub or
+hex pubkey, after a hand edit), `serve` authorises nobody until it reads cleanly again: task
+requests are denied (`--allow-all` still accepts them), every sender is held with their text
+kept, and `serve` says so once. What was held stays held after the list is repaired, until you
+run `agx held allow <npub>`.
+`agx wait` holds every sender the same way. `agx gateway` holds every sender instead of adding
+them to its history, while its tasks and webhooks still follow each subscription's own `allowedPeers`.
+`agx doctor --local` names the bad entry by position.
+
 `--allowed-only` changes **printing only**. A held message is still counted and
 recorded as seen, `--reply-any` still auto-replies to it, and `--allow-all` still
 opens tasks to everyone (a stranger's `TASK` line prints, but its payload and the

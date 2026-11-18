@@ -16,7 +16,7 @@ import {
 import { toNpub } from "@nostr-agx/nostr";
 import { effectiveProfile } from "../config.js";
 import { loadIdentity } from "../identity.js";
-import { createCollector } from "../inbox.js";
+import { ALLOWLIST_UNREADABLE, createCollector } from "../inbox.js";
 import { acquireLock } from "../lock.js";
 import { profileDir } from "../paths.js";
 import { toHexPubkey } from "../peer.js";
@@ -143,6 +143,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		// The newest messages only: the gateway runs for months.
 		const store = new MessageStore(profileDir(name), undefined, { claimSpool: true, maxMessages: MAX_HISTORY_MESSAGES });
 		const allowed = new Set<string>();
+		let warnedAllowlist = false;
 		const refreshAllowed = () => {
 			try {
 				const current = effectiveProfile(name).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
@@ -150,8 +151,16 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				for (const entry of current) {
 					allowed.add(entry);
 				}
+				warnedAllowlist = false;
 			} catch {
-				// Keep the last good list; the next poll tries again.
+				// Nobody is allowed until it reads cleanly: a peer taken off the list must stop being
+				// allowed at once, not when the file is repaired. What arrives meanwhile is held.
+				// The next poll tries again.
+				allowed.clear();
+				if (!warnedAllowlist) {
+					warnedAllowlist = true;
+					log(ALLOWLIST_UNREADABLE);
+				}
 			}
 		};
 		refreshAllowed();

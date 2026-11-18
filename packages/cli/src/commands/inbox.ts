@@ -3,6 +3,7 @@ import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
 import {
+	ALLOWLIST_UNREADABLE,
 	createCollector,
 	heldList,
 	INBOX_SCHEMA,
@@ -12,7 +13,7 @@ import {
 	summaryLine,
 } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
-import { json, say, warn } from "../lib/output.js";
+import { json, notice, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toHexPubkey } from "../lib/peer.js";
 import { probeRelay } from "../lib/relay-probe.js";
@@ -98,10 +99,13 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 			let current: string[];
 			try {
 				current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
-			} catch (error) {
+			} catch {
+				// Nobody is authorised until it reads cleanly: what arrives meanwhile is held. On
+				// stderr, so `--json` output stays whole and the warning is not lost with it.
+				allowed.clear();
 				if (!warnedAllowlist) {
 					warnedAllowlist = true;
-					warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+					notice(ALLOWLIST_UNREADABLE);
 				}
 				return;
 			}

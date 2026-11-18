@@ -12,7 +12,7 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
-import { createCollector } from "../lib/inbox.js";
+import { ALLOWLIST_UNREADABLE, createCollector } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
 import {
 	neutralizeControls,
@@ -180,11 +180,14 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 		let current: string[];
 		try {
 			current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
-		} catch (error) {
-			// Keep the last good list; say so once instead of failing every poll.
+		} catch {
+			// Nobody is authorised until it reads cleanly: a peer taken off the list must stop being
+			// allowed at once, not when the file is repaired. A peer given with `--allow` goes too.
+			// What arrives meanwhile is held with its text. Say so once instead of every poll.
+			allowed.clear();
 			if (!warnedAllowlist) {
 				warnedAllowlist = true;
-				warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+				warn(ALLOWLIST_UNREADABLE);
 			}
 			return;
 		}
