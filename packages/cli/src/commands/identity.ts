@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import kleur from "kleur";
 import {
 	effectiveProfile,
@@ -9,6 +10,7 @@ import { AgxCliError, EXIT, usageError } from "../lib/errors.js";
 import {
 	createIdentity,
 	identityExists,
+	type IdentityFile,
 	identityFromSecret,
 	loadIdentity,
 	loadIdentityFile,
@@ -17,7 +19,7 @@ import {
 	toNsec,
 } from "../lib/identity.js";
 import { heading, info, json, kv, ok, say, warn } from "../lib/output.js";
-import { identityPath } from "../lib/paths.js";
+import { HardLinksUnavailableError, identityPath, PrivateFileExistsError } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { signNonceEvent } from "../lib/proof.js";
 import { readStdin } from "../lib/stdin.js";
@@ -31,20 +33,73 @@ export interface IdentityOptions {
 	stdin?: boolean;
 }
 
+const NEW_REMEDIATION =
+	"A listing's address is immutable, so replacing a key orphans any listing bound to it. To make a second agent, use another profile:\n    agx identity new --profile second\n  To replace this one anyway:\n    agx identity new --force";
+
+const IMPORT_REMEDIATION =
+	"Import into a fresh profile:\n    agx identity import <nsec> --profile imported\n  Or overwrite:  agx identity import <nsec> --force";
+
+function alreadyHasIdentity(profileName: string, remediation: string): AgxCliError {
+	return new AgxCliError(`Profile "${profileName}" already has an identity.`, {
+		exitCode: EXIT.config,
+		remediation,
+	});
+}
+
+/** The two commands that save an identity, for the advice each one gives when it cannot. */
+type SaveKind = "new" | "import";
+
+const EXISTS_REMEDIATION: Record<SaveKind, string> = {
+	new: NEW_REMEDIATION,
+	import: IMPORT_REMEDIATION,
+};
+
+const COMMAND: Record<SaveKind, string> = {
+	new: "agx identity new",
+	import: "agx identity import <nsec>",
+};
+
+function noHardLinks(profileName: string, kind: SaveKind): AgxCliError {
+	return new AgxCliError(
+		`Cannot create the identity of profile "${profileName}" in ${dirname(identityPath(profileName))}: that file system cannot make hard links, which agx needs to create an identity without any chance of replacing one.`,
+		{
+			exitCode: EXIT.config,
+			remediation: `Keep the agx folder on a disk that can:\n    AGX_HOME=/path/on/another/disk ${COMMAND[kind]}\n  Or, if you know this profile has no identity yet, skip the check:\n    ${COMMAND[kind]} --force`,
+		},
+	);
+}
+
+/**
+ * Save a new identity. Without --force the file is created only if nothing is
+ * there when it is written, so a second run for the same profile that got past
+ * the early check is refused the same way and the key that is there stays.
+ */
+function saveNewIdentity(
+	profileName: string,
+	identity: IdentityFile,
+	options: IdentityOptions,
+	kind: SaveKind,
+): void {
+	try {
+		saveIdentity(profileName, identity, { replace: options.force });
+	} catch (error) {
+		if (error instanceof PrivateFileExistsError) {
+			throw alreadyHasIdentity(profileName, EXISTS_REMEDIATION[kind]);
+		}
+		if (error instanceof HardLinksUnavailableError) {
+			throw noHardLinks(profileName, kind);
+		}
+		throw error;
+	}
+}
+
 export function identityNewCommand(options: IdentityOptions): void {
 	const profileName = resolveProfileName(options.profile);
 	if (identityExists(profileName) && !options.force) {
-		throw new AgxCliError(
-			`Profile "${profileName}" already has an identity.`,
-			{
-				exitCode: EXIT.config,
-				remediation:
-					"A listing's address is immutable, so replacing a key orphans any listing bound to it. To make a second agent, use another profile:\n    agx identity new --profile second\n  To replace this one anyway:\n    agx identity new --force",
-			},
-		);
+		throw alreadyHasIdentity(profileName, NEW_REMEDIATION);
 	}
 	const identity = createIdentity("generated");
-	saveIdentity(profileName, identity);
+	saveNewIdentity(profileName, identity, options, "new");
 
 	heading("identity created");
 	kv("profile", profileName);
@@ -81,14 +136,7 @@ export async function identityImportCommand(
 ): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
 	if (identityExists(profileName) && !options.force) {
-		throw new AgxCliError(
-			`Profile "${profileName}" already has an identity.`,
-			{
-				exitCode: EXIT.config,
-				remediation:
-					"Import into a fresh profile:\n    agx identity import <nsec> --profile imported\n  Or overwrite:  agx identity import <nsec> --force",
-			},
-		);
+		throw alreadyHasIdentity(profileName, IMPORT_REMEDIATION);
 	}
 	let raw = secret;
 	if (options.stdin || !raw) {
@@ -101,7 +149,7 @@ export async function identityImportCommand(
 		);
 	}
 	const identity = identityFromSecret(parseSecretInput(raw), "imported");
-	saveIdentity(profileName, identity);
+	saveNewIdentity(profileName, identity, options, "import");
 	ok(`Imported identity ${identity.npub} into profile "${profileName}".`);
 	json({ npub: identity.npub, pubkey: identity.publicKey });
 }

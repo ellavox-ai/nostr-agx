@@ -112,8 +112,20 @@ export function toNsec(secretKey: Uint8Array): string {
 	return nip19.nsecEncode(secretKey);
 }
 
-export function saveIdentity(profile: string, identity: IdentityFile): void {
-	writePrivateJson(identityPath(profile), identity);
+/**
+ * Write the identity file. Unless `replace` is set, the file is created only if
+ * nothing is there when it is written, and `PrivateFileExistsError` is thrown
+ * when something is: a look at `identityExists` a moment earlier does not stop a
+ * second writer, and a secret key must not be replaced by accident.
+ */
+export function saveIdentity(
+	profile: string,
+	identity: IdentityFile,
+	options?: { replace?: boolean },
+): void {
+	writePrivateJson(identityPath(profile), identity, {
+		exclusive: !options?.replace,
+	});
 }
 
 export function identityExists(profile: string): boolean {
