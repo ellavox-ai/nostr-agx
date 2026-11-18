@@ -122,6 +122,53 @@ class RelayRefusedError extends Error {
 	}
 }
 
+/**
+ * Answer a relay's NIP-42 AUTH challenge by signing it with `signer`.
+ *
+ * nostr-tools handles a challenge with `this.auth(this.onauth).catch(...)`. The
+ * promise behind it is settled by the relay's reply to our AUTH event, so it is
+ * REJECTED when the relay answers no, after nostr-tools' publish timeout when it
+ * never answers ("auth timed out"), and when we close the connection ("relay
+ * connection closed by us" — which {@link withRelay} does the moment its work is
+ * done, usually before the relay has replied).
+ *
+ * What the library does with that rejection depends on its version. In 2.24.3
+ * to 2.25.2 (2.25.0 is what the lockfile pins) the `.catch` re-throws it, and
+ * nothing can attach a handler to the re-throw, so Node ends the whole process:
+ * one relay's AUTH handling took down every send, poll and listener. From 2.25.3
+ * it prints "automatic auth failed:" with a stack trace instead. A reply sent on
+ * a closed socket is an unhandled rejection until 2.26.1.
+ *
+ * `auth` is wrapped so the library's call gets a promise that cannot reject, and
+ * a reply signed after the connection closed is not handed back. The result does
+ * not depend on the library version: the process is not ended and nothing is
+ * printed. Nothing here reads the outcome; whether the relay accepted us is
+ * learned from how it answers the REQ or the EVENT, as before.
+ */
+function answerAuthChallenges(relay: Relay, signer: AgxSigner): void {
+	// Verified before it is sent: a remote signer's answer is not trusted
+	// blindly, and verifyEvent is also what brands it a VerifiedEvent.
+	relay.onauth = async (evt) => {
+		const signed = await signer.signEvent(evt);
+		if (!verifyEvent(signed)) {
+			throw new Error("signer returned an invalid AUTH event");
+		}
+		if (!relay.connected) {
+			// A remote signer can take longer than the relay takes to answer the
+			// event, by which time withRelay has closed the connection. Handed
+			// back, the reply would be sent on a socket that is gone, and
+			// nostr-tools does not handle that failed send either. It has nowhere
+			// to go, so it is never handed back. Throwing instead would make the
+			// library print the error and its stack.
+			return new Promise<never>(() => {});
+		}
+		return signed;
+	};
+	const auth = relay.auth;
+	relay.auth = (signAuthEvent) =>
+		auth.call(relay, signAuthEvent).catch(() => "");
+}
+
 async function withRelay<T>(
 	url: string,
 	fn: (relay: Relay) => Promise<T>,
@@ -139,15 +186,7 @@ async function withRelay<T>(
 		"relay connect",
 	);
 	if (signer) {
-		// Verified before it is sent: a remote signer's answer is not trusted
-		// blindly, and verifyEvent is also what brands it a VerifiedEvent.
-		relay.onauth = async (evt) => {
-			const signed = await signer.signEvent(evt);
-			if (!verifyEvent(signed)) {
-				throw new Error("signer returned an invalid AUTH event");
-			}
-			return signed;
-		};
+		answerAuthChallenges(relay, signer);
 	}
 	try {
 		return await fn(relay);
@@ -255,11 +294,11 @@ const CLOSED_CONNECTION_ERROR = "SendingOnClosedConnection";
  * plus the one {@link withTimeout} generates. Everything matching means we never
  * got an answer — as opposed to getting one we did not like.
  *
- * Read off nostr-tools 2.25.0, which `package.json` pins EXACTLY for this
- * reason: these are its internal strings, not protocol, so a minor bump could
- * reword them and silently swap this classification's default. The tests below
- * assert each one; the pin is what makes a reword arrive as a lockfile change
- * someone reviews rather than as a `pnpm update`.
+ * Read off nostr-tools 2.25.0, the version the lockfile pins (`package.json`
+ * allows `^2.25.0`, so a fresh install can resolve a newer one): these are its
+ * internal strings, not protocol, so a minor bump could reword them and silently
+ * swap this classification's default. The tests below assert each one, so a
+ * reword shows up as a failing test after a bump, not as a wrong verdict.
  *
  * - `handleHardClose` supplies `relay connection closed` / `failed` / `timed out`
  *   / `closed by us`, all sharing one prefix, and `closeAllSubscriptions`
@@ -855,15 +894,7 @@ export async function listenEvents(
 				"relay connect",
 			);
 			if (signer) {
-				// Verified before it is sent: a remote signer's answer is not trusted
-				// blindly, and verifyEvent is also what brands it a VerifiedEvent.
-				relay.onauth = async (evt) => {
-					const signed = await signer.signEvent(evt);
-					if (!verifyEvent(signed)) {
-						throw new Error("signer returned an invalid AUTH event");
-					}
-					return signed;
-				};
+				answerAuthChallenges(relay, signer);
 			}
 
 			let sub: Subscription | null = null;
