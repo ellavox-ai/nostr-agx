@@ -48,8 +48,11 @@ describe("assertPublicUrl", () => {
 		}
 	});
 
-	it("accepts a public IPv4 literal (no DNS)", async () => {
-		expect((await assertPublicUrl("wss://1.1.1.1", wss)).ok).toBe(true);
+	it("accepts a public IPv4 literal (no DNS) and returns it for pinning", async () => {
+		expect(await assertPublicUrl("wss://1.1.1.1", wss)).toMatchObject({
+			ok: true,
+			addresses: ["1.1.1.1"],
+		});
 		expect((await assertPublicUrl("wss://8.8.8.8:443", wss)).ok).toBe(true);
 		// 172.15/172.32 are OUTSIDE the private 172.16–172.31 range.
 		expect((await assertPublicUrl("wss://172.15.0.1", wss)).ok).toBe(true);

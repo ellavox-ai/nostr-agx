@@ -17,6 +17,7 @@ import {
 	type INodeExecutionData,
 	NodeOperationError,
 } from "n8n-workflow";
+import WebSocket from "ws";
 import {
 	autoReplyGuard,
 	DEFAULT_AUTO_REPLY_LIMITS,
@@ -136,6 +137,7 @@ export async function requestTasks(
 				peer,
 				identity.relays,
 				identity.signer,
+				WebSocket,
 			);
 			if (!reachable) {
 				throw new NodeOperationError(
@@ -405,8 +407,13 @@ export async function getCards(
 			verifyNip05?: boolean;
 		};
 		const [{ card, reachable }, relays] = await Promise.all([
-			resolvePeerCardWithStatus(peer, identity.relays, identity.signer),
-			resolvePeerRelays(peer, identity.relays, identity.signer).catch(
+			resolvePeerCardWithStatus(
+				peer,
+				identity.relays,
+				identity.signer,
+				WebSocket,
+			),
+			resolvePeerRelays(peer, identity.relays, identity.signer, WebSocket).catch(
 				() => [] as string[],
 			),
 		]);

@@ -15,6 +15,7 @@ import type {
 	ITriggerFunctions,
 	Logger,
 } from "n8n-workflow";
+import WebSocket from "ws";
 // The CLI's in-process NIP-01 relay: plain ws on a random loopback port.
 import { type RunningRelay, startRelay } from "../../cli/src/relay/server";
 
@@ -51,6 +52,7 @@ export async function peerClient(
 	const transport = await NostrTransport.create({
 		signer: localSigner(agent.secretKey),
 		relays: [relayUrl(relay)],
+		ws: WebSocket,
 	});
 	return new AgxClient({
 		transport,

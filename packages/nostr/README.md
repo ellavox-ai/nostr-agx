@@ -45,4 +45,33 @@ non-Node bundle doesn't fail to resolve them, but where DNS is unavailable (brow
 **fails closed** — hostname destinations are rejected (literal IPs are still vetted). Run it in a
 Node runtime (`export const runtime = "nodejs"` on Next.js), not the edge runtime.
 
+## Private relays (SOCKS5, opt-in)
+
+`NostrTransport` can dial relays through a SOCKS5 proxy with the `relayProxy` field. It accepts a
+URL, a `{ url, stop() }` handle, or a lazy resolver:
+
+```ts
+const transport = await NostrTransport.create({
+  signer,
+  relays: ["wss://relay.private.ts.net"],
+  ws: WebSocket,
+  relayProxy: "socks5://127.0.0.1:1080",
+});
+```
+
+A bare URL is borrowed — the transport leaves it running and can be restarted. A handle is owned —
+`transport.stop()` closes it, and that transport cannot be restarted.
+
+Proxy routing is all-or-nothing for a transport: it applies to operator-configured relays and to
+peer-advertised NIP-65 relays. Use it when the whole transport is meant to go through the same proxy
+path; split public and private relays into separate transports/profiles if you need different paths.
+Proxy routing needs an explicit WebSocket implementation (`ws` in Node), because the global WHATWG
+WebSocket has no socket/agent options. Operator-configured relay hostnames are resolved by the proxy
+(`socks5h` semantics). Peer-advertised NIP-65 relays are first vetted with local DNS and then dialed
+with those addresses pinned, so a remote-DNS proxy cannot re-resolve them to a private address.
+`socks-proxy-agent` is an optional peer: install it only when you use `relayProxy`.
+
+A provider that can start and stop a local SOCKS5 proxy (for example, a tailnet
+client) can hand the transport a `{ url, stop() }` handle or a lazy resolver.
+
 > Status: **0.2.0 (draft)** — tracks the NIP-AGX spec in `@nostr-agx/core`'s `SPEC.md`.

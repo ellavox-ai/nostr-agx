@@ -1,6 +1,7 @@
 import { DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
 import { localSigner, NostrTransport, toNpub } from "@nostr-agx/nostr";
 import type { IDataObject, ITriggerResponse } from "n8n-workflow";
+import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgxTrigger } from "../nodes/AgxTrigger/AgxTrigger.node";
 import { __resetLiveClaimsForTests } from "../nodes/shared/trigger-state";
@@ -411,6 +412,7 @@ describe("AGX Trigger: messages", () => {
 		const transport = await NostrTransport.create({
 			signer: localSigner(from.secretKey),
 			relays: [relayUrl(relay)],
+			ws: WebSocket,
 		});
 		// The sender's clock, read when the message is signed (before the first
 		// await of `publishMessage`).
@@ -563,6 +565,7 @@ describe("AGX Trigger: messages", () => {
 			const transport = await NostrTransport.create({
 				signer: localSigner(from.secretKey),
 				relays: [relayUrl(relay)],
+				ws: WebSocket,
 			});
 			await transport.publishReceipt(n8nAgent.publicKey, {
 				refEventId: "a".repeat(64),

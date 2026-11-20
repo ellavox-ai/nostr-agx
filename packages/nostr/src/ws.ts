@@ -1,8 +1,10 @@
 import { useWebSocketImplementation } from "nostr-tools/relay";
 
 /**
- * WebSocket injection. nostr-tools uses the global `WebSocket` in browsers/edge,
- * but Node has none — the host injects one (`ws`). Call once before dialing.
+ * WebSocket injection. `NostrTransport` passes its implementation to every relay
+ * dial, so two transports in one process can use different paths (for example
+ * only one through Tailscale). The helper below is kept only for library callers
+ * that dial `nostr-tools` relays directly.
  */
 
 /** A WHATWG-compatible WebSocket constructor (e.g. the Node `ws` package's
@@ -12,9 +14,10 @@ export type WebSocketImpl = unknown;
 
 let configured = false;
 
-/** Configure the WebSocket implementation for relay connections. Pass a Node `ws`
- * constructor; omit in a browser/edge runtime where a global `WebSocket` exists.
- * Idempotent — a repeat call with the same intent is a no-op. */
+/** Configure nostr-tools' process-global WebSocket implementation.
+ *
+ * @deprecated `NostrTransport` no longer uses this: it injects its own WebSocket
+ * per relay connection. Call this only when dialing `nostr-tools` directly. */
 export function configureWebSocket(impl?: WebSocketImpl): void {
 	if (impl) {
 		useWebSocketImplementation(

@@ -11,7 +11,6 @@ import {
 	agxLogger,
 	createTransport,
 	identityFromCredentials,
-	useWebSocket,
 } from "../shared/identity";
 import { getCards, getIdentity, requestTasks, sendMessages } from "./actions";
 
@@ -283,10 +282,6 @@ export class Agx implements INodeType {
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-		// Before any relay call, on every operation: Get Card dials relays without
-		// a transport, and each node file bundles its own nostr-tools, so nothing
-		// else is guaranteed to have done it in this process.
-		useWebSocket();
 		const items = this.getInputData();
 		const resource = this.getNodeParameter("resource", 0) as string;
 		const operation = this.getNodeParameter("operation", 0) as string;

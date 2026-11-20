@@ -11,12 +11,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const publishToRelays = vi.fn();
 const resolvePeerRelays = vi.fn();
+let peerPins = new Map<string, string[]>();
+const useWebSocketImplementation = vi.fn();
 const listenEvents = vi.fn(
 	async (..._args: unknown[]): Promise<
 		Array<{ close(): void; relay: { close(): void } }>
 	> => [],
 );
 
+vi.mock("nostr-tools/relay", () => ({
+	useWebSocketImplementation: (...args: unknown[]) =>
+		useWebSocketImplementation(...args),
+}));
 vi.mock("./relay-pool", () => ({
 	publishToRelays: (...args: unknown[]) => publishToRelays(...args),
 	pollInbox: vi.fn(async () => ({ events: [], complete: true })),
@@ -24,7 +30,10 @@ vi.mock("./relay-pool", () => ({
 }));
 vi.mock("./discovery", async (importOriginal) => ({
 	...(await importOriginal<typeof import("./discovery")>()),
-	resolvePeerRelays: (...args: unknown[]) => resolvePeerRelays(...args),
+	resolvePeerRelaysWithPins: async (...args: unknown[]) => ({
+		relays: await resolvePeerRelays(...args),
+		pins: peerPins,
+	}),
 }));
 
 import { MAX_BODY } from "@nostr-agx/core";
@@ -73,9 +82,34 @@ function transport(relays: string[] = [OURS]): Promise<NostrTransport> {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	peerPins = new Map();
 	resolvePeerRelays.mockResolvedValue([]);
 	// Module-scoped cache outlives each transport() — clear between cases.
 	__resetPeerRelayCacheForTests();
+});
+
+describe("WebSocket injection", () => {
+	it("keeps each transport's implementation local to its own dials", async () => {
+		class WsA {}
+		class WsB {}
+		const a = await NostrTransport.create({
+			signer: localSigner(generateSecretKey()),
+			relays: [OURS],
+			ws: WsA,
+		});
+		const b = await NostrTransport.create({
+			signer: localSigner(generateSecretKey()),
+			relays: [OURS],
+			ws: WsB,
+		});
+
+		await a.start();
+		await b.start();
+
+		expect(listenEvents.mock.calls[0]?.[2]).toMatchObject({ ws: WsA });
+		expect(listenEvents.mock.calls[1]?.[2]).toMatchObject({ ws: WsB });
+		expect(useWebSocketImplementation).not.toHaveBeenCalled();
+	});
 });
 
 describe("transport lifecycle", () => {
@@ -130,6 +164,31 @@ describe("transport lifecycle", () => {
 });
 
 describe("publishMessage derives deliveredToPeer", () => {
+	it("uses pinned DNS for peer relays and normal DNS for own relays", async () => {
+		class FakeWebSocket {}
+		peerPins.set("theirs.example", ["1.1.1.1"]);
+		resolvePeerRelays.mockResolvedValue([THEIRS]);
+		publishToRelays.mockImplementation(async (targets: string[]) =>
+			published({ targets }),
+		);
+
+		const instance = await NostrTransport.create({
+			signer: localSigner(generateSecretKey()),
+			relays: [OURS],
+			ws: FakeWebSocket,
+			relayProxy: "socks5://127.0.0.1:1080",
+		});
+		await instance.publishMessage(PEER, { text: "hi" });
+
+		const selector = publishToRelays.mock.calls[0]?.[4] as
+			| ((url: string) => unknown)
+			| undefined;
+		expect(selector).toBeTypeOf("function");
+		expect(selector?.(OURS)).toBeUndefined();
+		expect(selector?.(THEIRS)).toBeDefined();
+		expect(selector?.(THEIRS)).not.toBe(FakeWebSocket);
+	});
+
 	it("is FALSE, and ok is false, when every relay the peer advertises refused", async () => {
 		resolvePeerRelays.mockResolvedValue([THEIRS]);
 		publishToRelays.mockImplementation(async (targets: string[]) =>

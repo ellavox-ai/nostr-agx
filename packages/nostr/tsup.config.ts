@@ -11,6 +11,7 @@ export default defineConfig({
 	clean: true,
 	treeshake: true,
 	// WebSocket is injected by the consumer (Node passes `ws`, browser/edge use
-	// the global); never bundle a WS impl.
-	external: ["ws"],
+	// the global); never bundle a WS impl. `socks-proxy-agent` is an optional
+	// peer, loaded only when `relayProxy` is used.
+	external: ["socks-proxy-agent", "ws"],
 });
