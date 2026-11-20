@@ -42,6 +42,7 @@
 		"test:e2e": "node scripts/e2e-claude-inbox.mjs",
 		"test:e2e:login": "E2E=1 vitest run src/test/login.e2e.test.ts",
 		"test:e2e:serve": "E2E=1 vitest run src/test/serve.e2e.test.ts",
+		"test:e2e:tailscale": "E2E=1 vitest run src/test/tailscale.e2e.test.ts",
 		"test:e2e:ui": "node scripts/e2e-ui.mjs"
 	},
 	"dependencies": {
@@ -49,13 +50,23 @@
 		"commander": "^15.0.0",
 		"kleur": "^4.1.5",
 		"nostr-tools": "^2.25.0",
+		"socks-proxy-agent": "^10.1.0",
 		"ws": "^8.21.3",
 		"zod": "4.4.3"
+	},
+	"peerDependencies": {
+		"@nostr-agx/tailscale": "^0.6.0"
+	},
+	"peerDependenciesMeta": {
+		"@nostr-agx/tailscale": {
+			"optional": true
+		}
 	},
 	"devDependencies": {
 		"@axe-core/playwright": "^4.13.0",
 		"@nostr-agx/core": "workspace:*",
 		"@nostr-agx/nostr": "workspace:*",
+		"@nostr-agx/tailscale": "workspace:*",
 		"@types/node": "^26.4.0",
 		"@types/ws": "^8.18.1",
 		"playwright": "^1.64.0",

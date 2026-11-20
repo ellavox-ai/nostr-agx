@@ -47,10 +47,11 @@ export {
 	pollInbox,
 	publishToRelays,
 } from "./relay-pool";
+export * from "./relay-proxy";
 export * from "./signer";
 export {
 	assertPublicHttpsUrl,
 	assertPublicUrl,
 	type UrlSafetyResult,
 } from "./ssrf";
-export { configureWebSocket } from "./ws";
+export { configureWebSocket, type WebSocketImpl } from "./ws";

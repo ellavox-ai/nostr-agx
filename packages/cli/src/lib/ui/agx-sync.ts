@@ -33,7 +33,9 @@ export async function createAgxSync(options: {
 	const collector = createCollector({ store: options.store, allowed: options.allowed });
 	const seen = new FileSeenStore(options.profileName);
 	const state = loadState(options.profileName);
-	const transport = await createTransport(options.profile, options.identity, logger);
+	const transport = await createTransport(options.profile, options.identity, logger, {
+		profileName: options.profileName,
+	});
 	const client = new AgxClient({
 		transport,
 		seen,

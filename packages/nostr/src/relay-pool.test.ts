@@ -123,6 +123,36 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
+describe("per-transport WebSocket injection", () => {
+	it("is passed to every relay dial", async () => {
+		class FakeWebSocket {}
+		const ws = FakeWebSocket;
+
+		await publishToRelays(["wss://a"], ev({ kind: MESSAGE_KIND }), undefined, ws);
+		await fetchByAuthor({
+			relays: ["wss://b"],
+			author: OTHER,
+			kinds: [MESSAGE_KIND],
+			ws,
+		});
+		await pollInbox({ relays: ["wss://c"], pubkey: ME, since: 0, ws });
+		await listenEvents(
+			undefined as never,
+			["wss://d"],
+			{ pubkey: ME, ws },
+			vi.fn(),
+		);
+
+		expect(connectRelay).toHaveBeenCalledTimes(4);
+		for (const call of connectRelay.mock.calls) {
+			expect(call[1]).toMatchObject({ websocketImplementation: ws });
+		}
+		expect(connectRelay.mock.calls[3]?.[1]).toMatchObject({
+			enableReconnect: true,
+		});
+	});
+});
+
 describe("listenEvents", () => {
 	it("subscribes once per relay for gift wraps addressed to the requested pubkey", async () => {
 		const callback = vi.fn();

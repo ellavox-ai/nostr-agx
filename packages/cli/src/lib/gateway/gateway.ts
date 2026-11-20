@@ -22,7 +22,7 @@ import { profileDir } from "../paths.js";
 import { isPastedSecretKey, toHexPubkey } from "../peer.js";
 import { FileSeenStore, loadState, updateState } from "../state.js";
 import { MessageStore } from "../store/message-store.js";
-import { createTransport } from "../transport.js";
+import { createTransport, HANDSHAKE_TIMEOUT_MS, withHandshakeTimeout } from "../transport.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
@@ -63,6 +63,9 @@ export interface GatewayOptions {
 	port?: number;
 	/** Inbox poll interval, ms. Default 3000. */
 	pollIntervalMs?: number;
+	/** Per-run Tailscale opt-in/out (`--tailscale`, `--without-tailscale`). */
+	tailscale?: boolean;
+	withoutTailscale?: boolean;
 	logger?: AgxLogger;
 	/** One line per thing the gateway did, for its console. */
 	log?: (line: string) => void;
@@ -143,7 +146,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 	let stopGateway: (() => Promise<void>) | undefined;
 	try {
 		const state = loadState(name);
-		const transport = await createTransport(profile, identity, options.logger);
+		const transport = await createTransport(profile, identity, options.logger, {
+			profileName: name,
+			tailscale: options.tailscale,
+			withoutTailscale: options.withoutTailscale,
+		});
 		const seen = new FileSeenStore(name);
 		// The newest messages only: the gateway runs for months.
 		const store = new MessageStore(profileDir(name), undefined, { claimSpool: true, maxMessages: MAX_HISTORY_MESSAGES });
@@ -196,6 +203,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			relays: profile.relays,
 			signer: identity.signer,
 			transport,
+			ws: withHandshakeTimeout(HANDSHAKE_TIMEOUT_MS),
 			requester,
 			guard: new AutoReplyGuard(),
 			recordSent: (message) => {

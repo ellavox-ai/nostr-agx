@@ -33,6 +33,12 @@ export default defineConfig({
 					new URL("../nostr/src/index.ts", import.meta.url),
 				),
 			},
+			{
+				find: "@nostr-agx/tailscale",
+				replacement: fileURLToPath(
+					new URL("../../integrations/tailscale/src/index.ts", import.meta.url),
+				),
+			},
 		],
 	},
 });

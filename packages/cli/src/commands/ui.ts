@@ -14,11 +14,11 @@ import { info, json, kv, ok, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { MessageStore } from "../lib/store/message-store.js";
-import { createTransport, makeLogger } from "../lib/transport.js";
 import type { AgentLookup, ApiDeps } from "../lib/ui/api.js";
 import { createAgxStore } from "../lib/ui/agx-store.js";
 import { type AgxSync, createAgxSync } from "../lib/ui/agx-sync.js";
 import { createDevStore } from "../lib/ui/dev-store.js";
+import { createUiSendTransport } from "../lib/ui/send-transport.js";
 import {
 	DEFAULT_DRAFT_DIR,
 	isSafeDraftName,
@@ -63,6 +63,12 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 	let store: UiStore;
 	let releaseLock: () => void = () => undefined;
 	let closeSync: () => Promise<void> = async () => undefined;
+	// One transport for all sends in this UI process: one tsnet child, one
+	// tailnet node and one OAuth key, stopped on shutdown.
+	const sendTransport = createUiSendTransport(profile, identity, {
+		profileName,
+		verbose: options.verbose ?? false,
+	});
 	if (options.devStore) {
 		if (process.env.AGX_UI_DEV_STORE !== "1") {
 			throw new AgxCliError("--dev-store is for tests only.", { exitCode: EXIT.usage, remediation: "Set AGX_UI_DEV_STORE=1 to use it." });
@@ -160,7 +166,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 				if (options.devStore) {
 					return { ok: false, detail: "Sending is off with --dev-store." };
 				}
-				const transport = await createTransport(profile, identity, makeLogger(options.verbose ?? false));
+				const transport = await sendTransport.get();
 				const res = await transport.publishMessage(toHexPubkey(to, "recipient"), {
 					text: body,
 					subject: subject ?? null,
@@ -204,7 +210,11 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 			closing = true;
 			try {
 				await server.close();
-				await closeSync();
+				try {
+					await closeSync();
+				} finally {
+					await sendTransport.close();
+				}
 			} catch (error) {
 				warn(`Stopping was not clean: ${safeMessage(error)}`);
 			} finally {
@@ -237,6 +247,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 	} catch (error) {
 		// Anything that fails after the lock is taken (a bad --port, a missing asset, a busy port) must free it.
 		await closeSync().catch(() => undefined);
+		await sendTransport.close();
 		releaseLock();
 		throw error;
 	}

@@ -24,10 +24,23 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: integrations/tailscale/launcher/go.mod
+          cache-dependency-path: integrations/tailscale/launcher/go.sum
       - run: pnpm install --frozen-lockfile
+      # bin/ is not checked in, so build the launchers the tests and
+      # check-packages need from the Go source pinned in go.mod.
+      - name: Stage bundled Tailscale launchers
+        run: make -C integrations/tailscale/launcher stage
       - run: pnpm build
       - run: pnpm type-check
       - run: pnpm test
+      # The unit tests alias sibling packages to their TypeScript sources, so
+      # only this built-CLI smoke test catches ESM/CJS bundling and process
+      # lifecycle regressions in dist/agx.js.
+      - name: Built CLI Tailscale smoke test
+        run: pnpm --filter @nostr-agx/cli test:e2e:tailscale
       - name: Check what each package ships
         run: node scripts/check-packages.mjs
 

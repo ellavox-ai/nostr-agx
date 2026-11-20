@@ -20,9 +20,10 @@ import { normalizePubkey } from "./address";
 import {
 	type AgentCard,
 	buildCard,
+	type ResolvedPeerRelays,
 	resolveNip05,
 	resolvePeerCard,
-	resolvePeerRelays,
+	resolvePeerRelaysWithPins,
 	signCardEvent,
 	signRelayListEvent,
 } from "./discovery";
@@ -49,13 +50,23 @@ import {
 	pollInbox,
 	publishToRelays,
 	type RelayFailureKind,
+	type RelayWebSocketSelector,
 } from "./relay-pool";
+import {
+	createProxyWebSocket,
+	type DnsLookup,
+	isBorrowedRelayProxy,
+	type RelayProxyHandle,
+	type RelayProxyInput,
+	RelayProxyError,
+	resolveRelayProxy,
+} from "./relay-proxy";
 import {
 	type AgxSigner,
 	type AgxSignerUnavailableError,
 	isSignerUnavailable,
 } from "./signer";
-import { configureWebSocket, type WebSocketImpl } from "./ws";
+import type { WebSocketImpl } from "./ws";
 import type { Subscription } from "nostr-tools/relay";
 
 export interface NostrTransportConfig {
@@ -68,6 +79,16 @@ export interface NostrTransportConfig {
 	ws?: WebSocketImpl;
 	/** Optional logger (default no-op). */
 	logger?: AgxLogger;
+	/**
+	 * Route relay WebSockets through a SOCKS5 proxy: a URL, a started handle
+	 * (whose `stop()` this transport will call), or a lazy resolver.
+	 *
+	 * Opt-in and transport-only — the exchange stays plain Nostr. A bare URL is
+	 * borrowed (the transport leaves it running); a handle is owned (the
+	 * transport stops it). A provider that starts a local proxy can return a
+	 * ready-made lazy resolver.
+	 */
+	relayProxy?: RelayProxyInput;
 }
 
 function nowSec(): number {
@@ -91,7 +112,22 @@ interface CacheEntry<T> {
  * (ingest.ts's `pollOneTeam`). Keyed on transport identity + relay set, not
  * just peer pubkey — different teams query different relays, so pubkey-only
  * keying would leak one team's resolution to another. */
-const peerRelayCache = new Map<string, CacheEntry<string[]>>();
+const peerRelayCache = new Map<string, CacheEntry<ResolvedPeerRelays>>();
+
+/** Fail-closed lookup for peer relays. The addresses come from the public-DNS
+ * SSRF check in discovery; anything not vetted is rejected rather than handed
+ * to the proxy's resolver. */
+function pinnedLookup(pins: Map<string, string[]>): DnsLookup {
+	return (hostname, _options, callback) => {
+		const addresses = pins.get(hostname.toLowerCase());
+		const address = addresses?.[0];
+		if (!address) {
+			callback(new Error(`No vetted address for peer relay host ${hostname}`));
+			return;
+		}
+		callback(null, address, address.includes(":") ? 6 : 4);
+	};
+}
 
 /** Sweeps expired entries on write; nothing else bounds this map's size. */
 function evictExpired(cache: Map<string, CacheEntry<unknown>>): void {
@@ -131,6 +167,15 @@ export class NostrTransport implements AgxTransport {
 	>();
 
 	private readonly ws?: WebSocketImpl | undefined;
+	/** Same proxy, but with local-DNS SOCKS semantics and a vetted-address
+	 * lookup. Used only for peer-advertised relays. */
+	private readonly pinnedWs?: WebSocketImpl;
+	/** hostname → public addresses vetted by the peer-relay SSRF guard. */
+	private readonly peerDnsPins = new Map<string, string[]>();
+	/** The proxy this transport dials through, when one is configured. */
+	private relayProxy?: RelayProxyHandle;
+	/** Set once `stop()` has released the proxy, so a restart fails clearly. */
+	private proxyReleased = false;
 	private onMessageHandlers = new Set<(msg: AgxIncomingMessage) => void | Promise<void>>();
 	private onReceiptHandlers = new Set<(receipt: AgxIncomingReceipt) => void | Promise<void>>();
 	private messageListenerOptions = new Map<
@@ -149,15 +194,56 @@ export class NostrTransport implements AgxTransport {
 	 * synchronous (the `AgxTransport` contract) even for a remote signer. */
 	static async create(config: NostrTransportConfig): Promise<NostrTransport> {
 		const publicKey = await config.signer.getPublicKey();
-		return new NostrTransport(config, publicKey);
+		let proxy: RelayProxyHandle | undefined;
+		try {
+			proxy = await resolveRelayProxy(config.relayProxy);
+			const ws = proxy
+				? await createProxyWebSocket(proxy.url, config.ws)
+				: config.ws;
+			const peerDnsPins = new Map<string, string[]>();
+			const pinnedWs = proxy
+				? await createProxyWebSocket(proxy.url, config.ws, {
+						dns: "pinned",
+						lookup: pinnedLookup(peerDnsPins),
+					})
+				: undefined;
+			return new NostrTransport(
+				config,
+				publicKey,
+				ws,
+				proxy,
+				pinnedWs,
+				peerDnsPins,
+			);
+		} catch (error) {
+			await proxy?.stop().catch(() => undefined);
+			throw error;
+		}
 	}
 
-	private constructor(config: NostrTransportConfig, publicKey: string) {
-		configureWebSocket(config.ws);
+	private constructor(
+		config: NostrTransportConfig,
+		publicKey: string,
+		ws: WebSocketImpl | undefined,
+		proxy: RelayProxyHandle | undefined,
+		pinnedWs: WebSocketImpl | undefined,
+		peerDnsPins: Map<string, string[]>,
+	) {
 		this.signer = config.signer;
 		this.publicKey = publicKey;
 		this.relays = config.relays;
 		this.logger = config.logger;
+		this.ws = ws;
+		this.pinnedWs = pinnedWs;
+		for (const [host, addresses] of peerDnsPins) {
+			this.peerDnsPins.set(host, addresses);
+		}
+		this.relayProxy = proxy;
+	}
+
+	/** The SOCKS5 URL in use, if any. Useful for logs and diagnostics. */
+	get relayProxyUrl(): string | undefined {
+		return this.relayProxy?.url;
 	}
 
 	whoami(): string {
@@ -171,24 +257,51 @@ export class NostrTransport implements AgxTransport {
 
 	/** Resolve a peer's NIP-65 relays, memoized for {@link PEER_CACHE_TTL_MS}.
 	 * Best-effort: a resolution failure caches an empty list so a peer with no (or
-	 * an unreachable) relay list isn't re-dialed on every send within the TTL. */
-	private async cachedPeerRelays(pubkey: string): Promise<string[]> {
+	 * an unreachable) relay list isn't re-dialed on every send within the TTL.
+	 * The vetted addresses are also recorded for the pinned-DNS proxy. */
+	private async cachedPeerRelays(
+		pubkey: string,
+	): Promise<ResolvedPeerRelays> {
 		const key = this.peerRelayCacheKey(pubkey);
 		const hit = peerRelayCache.get(key);
 		if (hit && hit.expires > Date.now()) {
+			this.recordPeerPins(hit.value.pins);
 			return hit.value;
 		}
-		const relays = await resolvePeerRelays(
+		const empty: ResolvedPeerRelays = {
+			relays: [],
+			pins: new Map<string, string[]>(),
+		};
+		const resolved = await resolvePeerRelaysWithPins(
 			pubkey,
 			this.relays,
 			this.signer,
-		).catch(() => [] as string[]);
+			this.ws,
+		).catch(() => empty);
+		this.recordPeerPins(resolved.pins);
 		evictExpired(peerRelayCache);
 		peerRelayCache.set(key, {
-			value: relays,
+			value: resolved,
 			expires: Date.now() + PEER_CACHE_TTL_MS,
 		});
-		return relays;
+		return resolved;
+	}
+
+	private recordPeerPins(pins: Map<string, string[]>): void {
+		for (const [host, addresses] of pins) {
+			this.peerDnsPins.set(host, addresses);
+		}
+	}
+
+	/** Peer relays (whose hostnames were vetted locally) must not be handed to a
+	 * remote-DNS proxy for a second resolution. */
+	private webSocketForRelay(url: string): WebSocketImpl | undefined {
+		try {
+			const host = new URL(url).hostname.toLowerCase();
+			return this.peerDnsPins.has(host) ? this.pinnedWs : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Resolve a peer's Agent Card, memoized for {@link PEER_CACHE_TTL_MS}. */
@@ -203,6 +316,7 @@ export class NostrTransport implements AgxTransport {
 			pubkey,
 			this.relays,
 			this.signer,
+			this.ws,
 		).catch(() => null);
 		this.peerCardCache.set(pubkey, {
 			value: card,
@@ -440,9 +554,15 @@ export class NostrTransport implements AgxTransport {
 			throw err;
 		}
 		// NIP-65: route to the recipient's relays ∪ ours (best-effort, cached).
-		const peerRelays = await this.cachedPeerRelays(recipient);
+		const { relays: peerRelays } = await this.cachedPeerRelays(recipient);
 		const targets = Array.from(new Set([...this.relays, ...peerRelays]));
-		const published = await publishToRelays(targets, event, this.signer);
+		const published = await publishToRelays(
+			targets,
+			event,
+			this.signer,
+			this.ws,
+			(url) => this.webSocketForRelay(url),
+		);
 
 		// "Some relay took it" is not the same as "the recipient can read it".
 		// The recipient polls THEIR relays, so if we know that set and every one
@@ -601,9 +721,15 @@ export class NostrTransport implements AgxTransport {
 		// A cache MISS here costs one resolution (RELAY_OP_TIMEOUT_MS +
 		// up to MAX_PEER_CANDIDATES DNS checks) — worth knowing when sizing
 		// ingest.ts's poll lease / cron maxDuration.
-		const peerRelays = await this.cachedPeerRelays(recipient);
+		const { relays: peerRelays } = await this.cachedPeerRelays(recipient);
 		const targets = Array.from(new Set([...this.relays, ...peerRelays]));
-		const published = await publishToRelays(targets, event, this.signer);
+		const published = await publishToRelays(
+			targets,
+			event,
+			this.signer,
+			this.ws,
+			(url) => this.webSocketForRelay(url),
+		);
 		return { ok: published.ok };
 	}
 
@@ -619,6 +745,7 @@ export class NostrTransport implements AgxTransport {
 			limit: opts.limit,
 			signer: this.signer,
 			logger: this.logger,
+			ws: this.ws,
 		});
 		// Opening a wrap is two ECDHs, the outer one against a one-time key that
 		// can never be cached — and the poll window re-covers two days of wraps
@@ -740,11 +867,11 @@ export class NostrTransport implements AgxTransport {
 		if (!pk) {
 			return { relays: [], card: null };
 		}
-		const [relays, card] = await Promise.all([
+		const [resolved, card] = await Promise.all([
 			this.cachedPeerRelays(pk),
 			this.cachedPeerCard(pk),
 		]);
-		return { relays, card };
+		return { relays: resolved.relays, card };
 	}
 
 	async verifyIdentity(
@@ -758,6 +885,7 @@ export class NostrTransport implements AgxTransport {
 			pubkey: pk,
 			relays: this.relays,
 			signer: this.signer,
+			ws: this.ws,
 		}).catch(() => null);
 		return r
 			? { id: r.nip05, domain: r.nip05Domain, verified: true }
@@ -800,11 +928,13 @@ export class NostrTransport implements AgxTransport {
 			this.relays,
 			await signCardEvent(this.signer, card, now),
 			this.signer,
+			this.ws,
 		);
 		const b = await publishToRelays(
 			this.relays,
 			await signRelayListEvent(this.signer, this.relays, now),
 			this.signer,
+			this.ws,
 		);
 		return { ok: a.ok && b.ok };
 	}
@@ -812,6 +942,12 @@ export class NostrTransport implements AgxTransport {
 	async start(): Promise<void> {
 		if (this.started) {
 			return;
+		}
+		if (this.proxyReleased) {
+			throw new RelayProxyError(
+				"This transport was stopped and its relay proxy was released.",
+				"Create a new NostrTransport, or start the proxy once and pass its URL as `relayProxy` to reuse it.",
+			);
 		}
 		if (this.startPromise) {
 			await this.startPromise;
@@ -834,6 +970,7 @@ export class NostrTransport implements AgxTransport {
 		const subscriptions = await listenEvents(this.signer, this.relays, {
 			pubkey: this.publicKey,
 			logger: this.logger,
+			ws: this.ws,
 			isKnown: async (transportIds) => {
 				const registrations = [
 					...this.messageListenerOptions.values(),
@@ -909,8 +1046,29 @@ export class NostrTransport implements AgxTransport {
 		const subscriptions = this.subscriptions;
 		this.subscriptions = [];
 		this.closeSubscriptions(subscriptions);
+		// Release the network path last, after every subscription that could use
+		// it is closed. A borrowed URL points at a proxy someone else owns, so it
+		// is left running and this transport can start again; an owned handle is
+		// stopped, which makes this transport single-use.
+		const proxy = this.relayProxy;
+		let stopError: unknown;
+		if (proxy) {
+			const borrowed = isBorrowedRelayProxy(proxy);
+			if (!borrowed) {
+				this.relayProxy = undefined;
+				this.proxyReleased = true;
+			}
+			try {
+				await proxy.stop();
+			} catch (error) {
+				stopError = error;
+			}
+		}
 		if (startFailed) {
 			throw startError;
+		}
+		if (stopError) {
+			throw stopError;
 		}
 	}
 

@@ -26,6 +26,8 @@ export interface GatewayCommandOptions {
 	port?: string;
 	pollInterval?: string;
 	verbose?: boolean;
+	tailscale?: boolean;
+	withoutTailscale?: boolean;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -54,15 +56,20 @@ export async function gatewayCommand(options: GatewayCommandOptions): Promise<vo
 			`${GATEWAY_KEY_ENV} must be at least ${MIN_ENV_KEY_CHARS} characters, such as the output of: openssl rand -base64 32`,
 		);
 	}
+	const port = portOf(options.port);
 	const gateway = await startGateway({
 		profile: profileName,
 		host,
-		port: portOf(options.port),
+		port,
 		pollIntervalMs,
+		tailscale: options.tailscale,
+		withoutTailscale: options.withoutTailscale,
 		logger: makeLogger(options.verbose ?? false),
 		log: (line) => say(`${kleur.dim(new Date().toISOString())} ${line}`),
 	});
 
+	// Tailscale is transport-only: the SDK proxy is owned by the gateway's
+	// NostrTransport. The HTTP API itself stays on loopback.
 	heading("agx gateway");
 	kv("profile", profileName);
 	kv("npub", gateway.npub);
