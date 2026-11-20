@@ -67,6 +67,9 @@ export interface ServeOptions {
 	/** `false` under `--no-tasks`: register no capability handler at all, so no
 	 * typed task request is ever answered (no receipt, no result). */
 	tasks?: boolean;
+	/** `--tailscale` / `--without-tailscale`; config is the opt-in default. */
+	tailscale?: boolean;
+	withoutTailscale?: boolean;
 }
 
 /** What a `--handler` module default-exports: capability key → implementation. */
@@ -153,6 +156,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	const logger = makeLogger(options.verbose ?? false);
 	const releaseLock = acquireLock(profileName);
 
+	// Tailscale is opt-in and transport-only. `createTransport` below starts the
+	// SDK-managed SOCKS5 proxy for this run and hands its lifecycle to the
+	// NostrTransport; no tailnet relay URL is derived or advertised.
 	// A damaged state or seen file stops serve (the error says which). Release
 	// the lock first: the process is about to exit, but an embedding host or a
 	// second host sharing AGX_HOME would otherwise wait for the stale lock.
@@ -196,7 +202,11 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	}
 	refreshAllowed();
 
-	const transport = await createTransport(profile, identity, logger);
+	const transport = await createTransport(profile, identity, logger, {
+		profileName,
+		tailscale: options.tailscale,
+		withoutTailscale: options.withoutTailscale,
+	});
 	// Keeps what arrives, held senders' text included. Output below is unchanged.
 	const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
 	const collector = createCollector({
@@ -490,7 +500,6 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			"The allowlist is empty, so every task request will be denied. Add a peer with `agx identity allow <npub>`.",
 		);
 	}
-
 	// This host drives pump() itself so it can persist the cursor after each poll;
 	// disable both library-managed polling and live dispatch.
 	const advertise = options.advertise === true;

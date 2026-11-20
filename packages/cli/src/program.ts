@@ -45,6 +45,12 @@ import {
 } from "./commands/peers.js";
 import { registerCommand } from "./commands/register.js";
 import { relayCommand } from "./commands/relay.js";
+import {
+	tailscaleDisableCommand,
+	tailscaleEnableCommand,
+	tailscaleStatusCommand,
+	tailscaleUpCommand,
+} from "./commands/tailscale.js";
 import { searchCommand } from "./commands/search.js";
 import { heldDecideCommand, heldListCommand } from "./commands/held.js";
 import { inboxCommand } from "./commands/inbox.js";
@@ -558,6 +564,14 @@ export function buildProgram(): Command {
 		)
 		.option("--once", "run a single poll and exit")
 		.option("--reset-cursor", "re-read the inbox from the beginning")
+		.option(
+			"--tailscale",
+			"route relay WebSockets through a bundled Tailscale proxy (opt-in)",
+		)
+		.option(
+			"--without-tailscale",
+			"ignore the profile's Tailscale opt-in for this run",
+		)
 		.option("-v, --verbose", "log transport activity")
 		.action((options) => serveCommand(withGlobals(options)));
 
@@ -569,6 +583,14 @@ export function buildProgram(): Command {
 		.option("--host <address>", "interface to listen on (put a TLS proxy in front of anything but 127.0.0.1)", "127.0.0.1")
 		.option("--port <port>", "port to listen on", "8787")
 		.option("--poll-interval <ms>", "inbox poll interval in milliseconds", "3000")
+		.option(
+			"--tailscale",
+			"route the gateway's relay WebSockets through a bundled Tailscale proxy (opt-in)",
+		)
+		.option(
+			"--without-tailscale",
+			"ignore the profile's Tailscale opt-in for this run",
+		)
 		.option("-v, --verbose", "log transport activity")
 		.action((options) => gatewayCommand(withGlobals(options)));
 	const gatewayKey = gateway
@@ -704,6 +726,56 @@ export function buildProgram(): Command {
 		.option("--regenerate-cert", "replace the stored certificate")
 		.option("-v, --verbose", "log every event and request")
 		.action((options) => relayCommand(withGlobals(options)));
+
+	// ------------------------------------------------------------ tailscale
+
+	const tailscale = program
+		.command("tailscale")
+		.description(
+			"opt in to Tailscale routing (bundled tsnet SOCKS5 proxy; transport stays Nostr)",
+		);
+	tailscale
+		.command("enable")
+		.description("configure Tailscale auth for this profile and verify the proxy")
+		.option("--auth-key <key>", "Tailscale auth key (prefer --auth-key-stdin)")
+		.option("--auth-key-stdin", "read the Tailscale auth key from stdin")
+		.option("--oauth-url <url>", "OAuth token URL of the authentication service")
+		.option("--oauth-client-id <id>", "OAuth client id")
+		.option("--oauth-client-secret <secret>", "OAuth client secret (prefer stdin)")
+		.option("--oauth-client-secret-stdin", "read the OAuth client secret from stdin")
+		.option("--oauth-scope <scope>", "OAuth scope to request")
+		.option("--oauth-tailnet <tailnet>", "tailnet for a minted key (default -)")
+		.addOption(
+			new Option("--oauth-token-auth <method>", "how to present the client secret").choices([
+				"basic",
+				"post",
+			]),
+		)
+		.option("--oauth-api-base-url <url>", "Tailscale API base for minting a key")
+		.option("--tag <tag...>", "tag for a minted key (repeatable, default tag:agx-agent)")
+		.option("--hostname <name>", "hostname to request from Tailscale")
+		.option("--state-dir <path>", "persistent tsnet state dir (default: fresh dir under AGX_HOME per run)")
+		.option("--no-up", "store the configuration without starting a proxy")
+		.option("-v, --verbose", "log transport activity")
+		.action((options) => tailscaleEnableCommand(withGlobals(options)));
+	tailscale
+		.command("up")
+		.description("verify the profile can start its bundled Tailscale proxy")
+		.option("--auth-key <key>", "one-off Tailscale auth key (not stored)")
+		.option("--auth-key-stdin", "read a one-off Tailscale auth key from stdin")
+		.option("--hostname <name>", "hostname to request from Tailscale")
+		.option("--state-dir <path>", "persistent tsnet state dir (default: fresh dir under AGX_HOME per run)")
+		.option("-v, --verbose", "log transport activity")
+		.action((options) => tailscaleUpCommand(withGlobals(options)));
+	tailscale
+		.command("status")
+		.description("show the opt-in, auth readiness and proxy settings (never a key)")
+		.action((options) => tailscaleStatusCommand(withGlobals(options)));
+	tailscale
+		.command("disable")
+		.description("stop starting a Tailscale proxy for this profile")
+		.option("--forget", "also delete this profile's stored Tailscale secrets")
+		.action((options) => tailscaleDisableCommand(withGlobals(options)));
 
 	program
 		.command("doctor")

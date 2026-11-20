@@ -4,6 +4,7 @@ import { ensureRelayCert, writeRelayMeta } from "../relay/cert.js";
 import { startRelay } from "../relay/server.js";
 
 export interface RelayOptions {
+	profile?: string;
 	port?: string;
 	verbose?: boolean;
 	tls?: boolean;
@@ -70,7 +71,6 @@ export async function relayCommand(options: RelayOptions): Promise<void> {
 	info(
 		"The wss:// form is for indexes that only accept wss:// relays. The plain port has no TLS, so a client must downgrade it to ws:// (for localhost only).",
 	);
-
 	if (cert && relay.tlsPort) {
 		say("");
 		heading("To let a TLS-only client reach this relay");

@@ -21,7 +21,15 @@ export default defineConfig([
 		noExternal: ["@nostr-agx/core", "@nostr-agx/nostr"],
 		// `ws` is a real runtime dependency (the relay server needs WebSocketServer);
 		// never bundle a native-ish socket implementation.
-		external: ["ws"],
+		// `socks-proxy-agent` (via `@nostr-agx/nostr`) is CommonJS. Bundling it
+		// into the ESM output leaves `require("events")`/`require("net")` calls
+		// that throw "Dynamic require ... is not supported" when a relay proxy
+		// is first used. Leave it as a runtime import instead.
+		// `@nostr-agx/tailscale` is an optional peer; it must stay a runtime
+		// dynamic import so ordinary installs do not fetch/load its ~100MB of
+		// bundled binaries. The CLI prints an actionable error only when the
+		// package is actually needed.
+		external: ["@nostr-agx/tailscale", "socks-proxy-agent", "ws"],
 		banner: {
 			js: "#!/usr/bin/env node",
 		},

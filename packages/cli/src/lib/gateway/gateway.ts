@@ -63,6 +63,9 @@ export interface GatewayOptions {
 	port?: number;
 	/** Inbox poll interval, ms. Default 3000. */
 	pollIntervalMs?: number;
+	/** Per-run Tailscale opt-in/out (`--tailscale`, `--without-tailscale`). */
+	tailscale?: boolean;
+	withoutTailscale?: boolean;
 	logger?: AgxLogger;
 	/** One line per thing the gateway did, for its console. */
 	log?: (line: string) => void;
@@ -138,7 +141,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 	let stopGateway: (() => Promise<void>) | undefined;
 	try {
 		const state = loadState(name);
-		const transport = await createTransport(profile, identity, options.logger);
+		const transport = await createTransport(profile, identity, options.logger, {
+			profileName: name,
+			tailscale: options.tailscale,
+			withoutTailscale: options.withoutTailscale,
+		});
 		const seen = new FileSeenStore(name);
 		// The newest messages only: the gateway runs for months.
 		const store = new MessageStore(profileDir(name), undefined, { claimSpool: true, maxMessages: MAX_HISTORY_MESSAGES });

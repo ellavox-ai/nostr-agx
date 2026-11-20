@@ -28,7 +28,13 @@
 		"rootDir": "src",
 		"outDir": "dist",
 		"noEmit": true,
-		"verbatimModuleSyntax": true
+		"verbatimModuleSyntax": true,
+		"baseUrl": ".",
+		"paths": {
+			"@nostr-agx/tailscale": [
+				"../../integrations/tailscale/dist/index.d.ts"
+			]
+		}
 	},
 	"include": [
 		"src"
