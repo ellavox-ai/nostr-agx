@@ -1,10 +1,11 @@
 import { CARD_KIND, fetchByAuthorWithStatus } from "@nostr-agx/nostr";
+import WebSocket from "ws";
 import type {
 	ICredentialsDecrypted,
 	ICredentialTestFunctions,
 	INodeCredentialTestResult,
 } from "n8n-workflow";
-import { identityFromCredentials, useWebSocket } from "./identity";
+import { identityFromCredentials } from "./identity";
 
 /**
  * Credential test: the key parses, and at least one relay answers a query.
@@ -20,7 +21,6 @@ export async function testAgxCredential(
 	let identity: ReturnType<typeof identityFromCredentials>;
 	try {
 		identity = identityFromCredentials(credential.data ?? {});
-		useWebSocket();
 	} catch (error) {
 		return {
 			status: "Error",
@@ -33,6 +33,7 @@ export async function testAgxCredential(
 		kinds: [CARD_KIND],
 		limit: 1,
 		signer: identity.signer,
+		ws: WebSocket,
 	});
 	if (answered === 0) {
 		return {

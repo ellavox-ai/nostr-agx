@@ -1,7 +1,6 @@
 import type { AgxLogger } from "@nostr-agx/core";
 import {
 	type AgxSigner,
-	configureWebSocket,
 	hexToBytes,
 	localSigner,
 	NostrTransport,
@@ -122,13 +121,6 @@ export function identityFromCredentials(
 		org: optionalText(data.org),
 		nip05: optionalText(data.nip05),
 	};
-}
-
-/** Point nostr-tools at the bundled `ws`, as the CLI does. Not the runtime's
- * global WebSocket: Node.js 20 has none, and nothing stops this package being
- * installed into an n8n that runs on it. */
-export function useWebSocket(): void {
-	configureWebSocket(WebSocket);
 }
 
 export function createTransport(

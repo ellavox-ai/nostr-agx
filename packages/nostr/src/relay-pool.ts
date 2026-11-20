@@ -16,6 +16,7 @@ import {
 	unwrapRumor,
 	type UnwrappedRumor,
 } from "./giftwrap";
+import type { WebSocketImpl } from "./ws";
 
 /**
  * Ids whose signature has already checked out in this process, oldest first.
@@ -49,10 +50,33 @@ function verifiedOnce(event: Event): boolean {
 }
 
 /**
- * Relay pool: short-lived connections for poll/publish/discovery. WebSocket is
- * configured once by the transport via `configureWebSocket`. A logger is injected
- * (default no-op). NIP-42 AUTH is auto-answered when a signer is supplied.
+ * Relay pool: short-lived connections for poll/publish/discovery. The owning
+ * transport passes its WebSocket implementation on every call, so two transports
+ * in one process can use different network paths (for example only one proxied
+ * through Tailscale). A logger is injected (default no-op). NIP-42 AUTH is
+ * auto-answered when a signer is supplied.
  */
+/** nostr-tools 2.25 accepts `websocketImplementation` at runtime but omits it
+ * from `Relay`'s narrowed option type. `AbstractRelay` is fully typed, but the
+ * whole pool already uses `Relay`; add the field back locally. */
+type RelayConnectOptions = NonNullable<Parameters<typeof Relay.connect>[1]> & {
+	websocketImplementation?: WebSocketImpl;
+};
+
+/** Select a dial path per relay. A transport with a remote-DNS proxy uses its
+ * normal WebSocket for operator relays and a pinned-DNS one for peer relays. */
+export type RelayWebSocketSelector = (url: string) => WebSocketImpl | undefined;
+
+function connectRelay(
+	url: string,
+	ws: WebSocketImpl | undefined,
+	options: RelayConnectOptions = {},
+): Promise<Relay> {
+	return Relay.connect(
+		url,
+		ws ? { ...options, websocketImplementation: ws } : options,
+	);
+}
 
 /** Per-op timeout budget — applied to the connect, to each REQ page (in
  * {@link reqPage}), and to each publish (in {@link publishToRelays}). It is NOT a
@@ -126,11 +150,13 @@ async function withRelay<T>(
 	url: string,
 	fn: (relay: Relay) => Promise<T>,
 	signer?: AgxSigner,
+	ws?: WebSocketImpl,
+	wsForRelay?: RelayWebSocketSelector,
 ): Promise<T> {
 	// Bound the connect too: a relay can accept the TCP socket then stall the WS
 	// upgrade, which would otherwise hang here past any per-op budget.
 	const relay = await withTimeout(
-		Relay.connect(url),
+		connectRelay(url, wsForRelay?.(url) ?? ws),
 		RELAY_OP_TIMEOUT_MS,
 		// No URL in the label. A connect timeout surfaces as
 		// `rejected[].error` too, and every caller already renders the relay
@@ -337,6 +363,7 @@ export async function fetchByAuthor(params: {
 	kinds: number[];
 	limit?: number;
 	signer?: AgxSigner;
+	ws?: WebSocketImpl;
 }): Promise<Event[]> {
 	return (await fetchByAuthorWithStatus(params)).events;
 }
@@ -353,6 +380,7 @@ export async function fetchByAuthorWithStatus(params: {
 	kinds: number[];
 	limit?: number;
 	signer?: AgxSigner;
+	ws?: WebSocketImpl;
 }): Promise<FetchByAuthorResult> {
 	const byId = new Map<string, Event>();
 	let answered = 0;
@@ -387,6 +415,7 @@ export async function fetchByAuthorWithStatus(params: {
 					}
 				},
 				params.signer,
+				params.ws,
 			),
 		),
 	);
@@ -403,6 +432,8 @@ export async function publishToRelays(
 	relays: string[],
 	event: Event,
 	signer?: AgxSigner,
+	ws?: WebSocketImpl,
+	wsForRelay?: RelayWebSocketSelector,
 ): Promise<{
 	ok: boolean;
 	accepted: number;
@@ -500,6 +531,8 @@ export async function publishToRelays(
 					);
 				},
 				signer,
+				ws,
+				wsForRelay,
 			),
 		),
 	);
@@ -557,6 +590,7 @@ export async function pollInbox(params: {
 	limit?: number;
 	signer?: AgxSigner;
 	logger?: AgxLogger;
+	ws?: WebSocketImpl;
 }): Promise<{ events: Event[]; complete: boolean }> {
 	const log = params.logger ?? noopLogger;
 	// CLAMPED, not just defaulted: `limit` arrives from
@@ -772,6 +806,7 @@ export async function pollInbox(params: {
 					return relayComplete;
 				},
 				params.signer,
+				params.ws,
 			),
 		),
 	);
@@ -828,6 +863,7 @@ export async function listenEvents(
 	relays: string[],
 	params: { pubkey: string } & AgxTransportListenerOptions & {
 		logger?: AgxLogger;
+		ws?: WebSocketImpl;
 	},
 	callback: (
 		data: AgxIncomingMessage | AgxIncomingReceipt,
@@ -846,7 +882,7 @@ export async function listenEvents(
 			// upgrade, which would otherwise hang here past any per-op budget.
 			const relay = await withTimeout(
 				// nostr-tools reconnects the socket and re-fires open subscriptions.
-				Relay.connect(url, { enableReconnect: true }),
+				connectRelay(url, params.ws, { enableReconnect: true }),
 				RELAY_OP_TIMEOUT_MS,
 				// No URL in the label. A connect timeout surfaces as
 				// `rejected[].error` too, and every caller already renders the relay

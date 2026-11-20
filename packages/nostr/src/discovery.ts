@@ -5,6 +5,7 @@ import { CARD_KIND, RELAY_LIST_KIND } from "./kinds";
 import { fetchByAuthor, fetchByAuthorWithStatus } from "./relay-pool";
 import type { AgxSigner } from "./signer";
 import { assertPublicUrl } from "./ssrf";
+import type { WebSocketImpl } from "./ws";
 
 /**
  * NIP-AGX discovery: publish/resolve a signed, UNENCRYPTED Agent Card + NIP-65
@@ -94,15 +95,27 @@ export function signRelayListEvent(
 	});
 }
 
+/** Peer relays plus the public addresses they were vetted against. */
+export interface ResolvedPeerRelays {
+	relays: string[];
+	/** hostname → public addresses from the SSRF guard. A caller dialing through
+	 * a remote-DNS SOCKS proxy must pin these; otherwise the proxy can resolve
+	 * the hostname again to a tailnet/private address (DNS rebinding). */
+	pins: Map<string, string[]>;
+}
+
 /** Resolve a peer's advertised relays (NIP-65). SSRF-guarded (public `wss://`)
- * and capped, since each becomes an outbound dial. */
-export async function resolvePeerRelays(
+ * and capped, since each becomes an outbound dial. Also returns the addresses
+ * the guard approved, so a proxied transport can avoid a second DNS lookup. */
+export async function resolvePeerRelaysWithPins(
 	pubkey: string,
 	relays: string[],
 	signer?: AgxSigner,
-): Promise<string[]> {
+	ws?: WebSocketImpl,
+): Promise<ResolvedPeerRelays> {
+	const empty = { relays: [] as string[], pins: new Map<string, string[]>() };
 	if (relays.length === 0) {
-		return [];
+		return empty;
 	}
 	const events = await fetchByAuthor({
 		relays,
@@ -110,10 +123,11 @@ export async function resolvePeerRelays(
 		kinds: [RELAY_LIST_KIND],
 		limit: 1,
 		signer,
+		ws,
 	});
 	const latest = events[0];
 	if (!latest) {
-		return [];
+		return empty;
 	}
 	// Dedupe + CAP the candidate set BEFORE the guard, so a card advertising
 	// thousands of failing `r` tags can't fan out into thousands of DNS lookups.
@@ -130,16 +144,37 @@ export async function resolvePeerRelays(
 		}
 	}
 	const safe: string[] = [];
+	const pins = new Map<string, string[]>();
 	for (const url of candidates) {
 		if (safe.length >= MAX_PEER_RELAYS) {
 			break;
 		}
 		const check = await assertPublicUrl(url, { protocols: ["wss:"] });
-		if (check.ok) {
-			safe.push(url);
+		if (!check.ok || !check.addresses?.length) {
+			continue;
 		}
+		safe.push(url);
+		let host: string;
+		try {
+			host = new URL(url).hostname.toLowerCase();
+		} catch {
+			// assertPublicUrl already parsed it; this is only a defensive guard.
+			continue;
+		}
+		const existing = pins.get(host);
+		pins.set(host, existing ? [...existing, ...check.addresses] : check.addresses);
 	}
-	return safe;
+	return { relays: safe, pins };
+}
+
+/** Resolve only the URLs. Kept for callers that do not dial through a proxy. */
+export async function resolvePeerRelays(
+	pubkey: string,
+	relays: string[],
+	signer?: AgxSigner,
+	ws?: WebSocketImpl,
+): Promise<string[]> {
+	return (await resolvePeerRelaysWithPins(pubkey, relays, signer, ws)).relays;
 }
 
 /** A peer's Agent Card, as {@link resolvePeerCard} returns it. */
@@ -154,6 +189,7 @@ export async function resolvePeerCard(
 	pubkey: string,
 	relays: string[],
 	signer?: AgxSigner,
+	ws?: WebSocketImpl,
 ): Promise<PeerCard | null> {
 	if (relays.length === 0) {
 		return null;
@@ -164,6 +200,7 @@ export async function resolvePeerCard(
 		kinds: [CARD_KIND],
 		limit: 1,
 		signer,
+		ws,
 	});
 	return parsePeerCard(events[0]);
 }
@@ -178,6 +215,7 @@ export async function resolvePeerCardWithStatus(
 	pubkey: string,
 	relays: string[],
 	signer?: AgxSigner,
+	ws?: WebSocketImpl,
 ): Promise<{ card: PeerCard | null; reachable: boolean }> {
 	if (relays.length === 0) {
 		return { card: null, reachable: false };
@@ -188,6 +226,7 @@ export async function resolvePeerCardWithStatus(
 		kinds: [CARD_KIND],
 		limit: 1,
 		signer,
+		ws,
 	});
 	return { card: parsePeerCard(events[0]), reachable: answered > 0 };
 }
@@ -226,6 +265,7 @@ export async function resolveNip05(params: {
 	pubkey: string;
 	relays: string[];
 	signer?: AgxSigner;
+	ws?: WebSocketImpl;
 }): Promise<{
 	nip05: string;
 	nip05Domain: string;
@@ -235,6 +275,7 @@ export async function resolveNip05(params: {
 		params.pubkey,
 		params.relays,
 		params.signer,
+		params.ws,
 	);
 	const claimed = card?.nip05;
 	if (!claimed) {

@@ -75,6 +75,10 @@ function classifyIpFallback(host: string): number {
 export interface UrlSafetyResult {
 	ok: boolean;
 	reason?: string;
+	/** The vetted addresses for `ok: true`. Callers that dial through a
+	 * remote-DNS proxy must use these instead of letting the proxy resolve the
+	 * hostname a second time. */
+	addresses?: string[];
 }
 
 export async function assertPublicUrl(
@@ -140,7 +144,7 @@ export async function assertPublicUrl(
 		}
 	}
 
-	return { ok: true };
+	return { ok: true, addresses };
 }
 
 /** Convenience wrapper: public HTTPS only. */

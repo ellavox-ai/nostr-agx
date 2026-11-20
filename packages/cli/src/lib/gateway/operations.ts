@@ -17,6 +17,7 @@ import {
 	resolvePeerCardWithStatus,
 	resolvePeerRelays,
 	toNpub,
+	type WebSocketImpl,
 } from "@nostr-agx/nostr";
 import { isPastedSecretKey } from "../peer.js";
 import type { NewOutboundMessage } from "../store/types.js";
@@ -43,6 +44,9 @@ export interface OperationDeps {
 	signer: AgxSigner;
 	publicKey: string;
 	transport: NostrTransport;
+	/** Same WebSocket implementation the transport uses, for direct discovery
+	 * calls that bypass the transport's own caches. */
+	ws: WebSocketImpl;
 	requester: Requester;
 	guard: AutoReplyGuard;
 	/** Keeps a sent message in the profile's history, as `agx send` does. */
@@ -183,7 +187,12 @@ export async function runTaskRequest(
 	storageKey?: string,
 ): Promise<Record<string, unknown>> {
 	if (req.checkCard) {
-		const { card, reachable } = await resolvePeerCardWithStatus(req.peer, deps.relays, deps.signer);
+		const { card, reachable } = await resolvePeerCardWithStatus(
+			req.peer,
+			deps.relays,
+			deps.signer,
+			deps.ws,
+		);
 		if (!reachable) {
 			throw new ApiError(
 				503,
@@ -333,8 +342,8 @@ export async function readCard(
 ): Promise<Record<string, unknown>> {
 	const peer = peerOf(peerInput);
 	const [{ card, reachable }, relays] = await Promise.all([
-		resolvePeerCardWithStatus(peer, deps.relays, deps.signer),
-		resolvePeerRelays(peer, deps.relays, deps.signer).catch(() => [] as string[]),
+		resolvePeerCardWithStatus(peer, deps.relays, deps.signer, deps.ws),
+		resolvePeerRelays(peer, deps.relays, deps.signer, deps.ws).catch(() => [] as string[]),
 	]);
 	if (!reachable) {
 		throw new ApiError(

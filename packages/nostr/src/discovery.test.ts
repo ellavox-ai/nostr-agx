@@ -23,6 +23,7 @@ import {
 	resolvePeerCard,
 	resolvePeerCardWithStatus,
 	resolvePeerRelays,
+	resolvePeerRelaysWithPins,
 } from "./discovery";
 import { CARD_KIND, RELAY_LIST_KIND } from "./kinds";
 
@@ -55,7 +56,10 @@ function cardEvent(content: unknown): Event {
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mockAssertPublicUrl.mockResolvedValue({ ok: true });
+	mockAssertPublicUrl.mockResolvedValue({
+		ok: true,
+		addresses: ["1.1.1.1"],
+	});
 });
 
 describe("resolvePeerCard — attacker-controlled card validation", () => {
@@ -165,6 +169,21 @@ describe("resolvePeerRelays — SSRF fan-out caps", () => {
 		]);
 		await resolvePeerRelays(PUBKEY, ["wss://seed"]);
 		expect(mockAssertPublicUrl).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns the vetted addresses for each peer relay host", async () => {
+		mockFetchByAuthor.mockResolvedValue([
+			relayListEvent(["wss://r1.example", "wss://r2.example"]),
+		]);
+		mockAssertPublicUrl.mockImplementation(async (url: string) => ({
+			ok: true,
+			addresses: [url.includes("r1") ? "1.1.1.1" : "8.8.8.8"],
+		}));
+
+		const resolved = await resolvePeerRelaysWithPins(PUBKEY, ["wss://seed"]);
+		expect(resolved.relays).toEqual(["wss://r1.example", "wss://r2.example"]);
+		expect(resolved.pins.get("r1.example")).toEqual(["1.1.1.1"]);
+		expect(resolved.pins.get("r2.example")).toEqual(["8.8.8.8"]);
 	});
 });
 
