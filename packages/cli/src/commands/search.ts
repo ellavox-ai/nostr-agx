@@ -1,6 +1,8 @@
 import { createApiClient, toCliError } from "../lib/api.js";
 import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
+import { usageError } from "../lib/errors.js";
 import { heading, info, json, say, table } from "../lib/output.js";
+import { isPastedSecretKey } from "../lib/peer.js";
 import { renderListingRows } from "./listing.js";
 
 export interface SearchOptions {
@@ -18,6 +20,13 @@ export async function searchCommand(
 	query: string | undefined,
 	options: SearchOptions,
 ): Promise<void> {
+	// The text goes to the remote index as typed. A secret key must not be sent there.
+	if (query !== undefined && isPastedSecretKey(query)) {
+		throw usageError(
+			"The search text you gave is a secret key (nsec1…), so it is not sent and not shown here.",
+			"Search for a name, a handle or a capability instead, for example:  agx search payables",
+		);
+	}
 	const profileName = resolveProfileName(options.profile);
 	const creds = resolveApiCredentials(profileName, { org: options.org });
 	const client = createApiClient(creds);

@@ -24,7 +24,7 @@ import {
 	table,
 	warn,
 } from "../lib/output.js";
-import { refuseSecretKey } from "../lib/peer.js";
+import { isPastedSecretKey, refuseSecretKey } from "../lib/peer.js";
 import { relaysForListing } from "../lib/relays.js";
 import { runtime } from "../lib/runtime.js";
 import { loadState, updateState } from "../lib/state.js";
@@ -106,6 +106,14 @@ function resolveListingId(
 	explicit: string | undefined,
 	profileName: string,
 ): string {
+	// The id goes to the remote index as typed and is saved in state.json, from where
+	// `agx doctor` sends it again. A secret key must not be sent or stored.
+	if (explicit !== undefined && isPastedSecretKey(explicit)) {
+		throw usageError(
+			"The listing id you gave is a secret key (nsec1…), so it is not sent, not stored and not shown here.",
+			"Find the id with:  agx listing list",
+		);
+	}
 	const stored = loadState(profileName).listingId;
 	const id = explicit ?? stored;
 	if (!id) {
