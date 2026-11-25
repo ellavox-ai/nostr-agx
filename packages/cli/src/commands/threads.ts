@@ -1,4 +1,5 @@
 import { AgxCliError, EXIT } from "../lib/errors.js";
+import { neutralizeControls } from "../lib/inbound-lines.js";
 import { tryAcquireLock } from "../lib/lock.js";
 import { info, json, say, table } from "../lib/output.js";
 import { resolveProfileName } from "../lib/config.js";
@@ -25,7 +26,7 @@ export function threadCommand(contextId: string, options: ThreadsOptions): void 
 	const store = new MessageStore(dir);
 	const messages = store.getThread(contextId);
 	if (messages.length === 0) {
-		throw new AgxCliError(`No thread "${contextId}".`, {
+		throw new AgxCliError(`No thread "${neutralizeControls(contextId)}".`, {
 			exitCode: EXIT.generic,
 			remediation: "List threads with: agx threads",
 		});
