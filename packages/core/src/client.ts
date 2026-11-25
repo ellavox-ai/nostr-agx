@@ -65,10 +65,17 @@ export interface AgxAuthorizeContext {
 	from: string;
 	capability: string;
 	/** The request's replay key, as {@link Task.eventId} — for a host that keeps
-	 * its own record of handled tasks and can turn one down before its receipt. */
+	 * its own record of handled tasks and can turn one down before its receipt.
+	 * The same request can be asked about more than once (see
+	 * {@link AgxAuthorizeContext.recheck}): turn down a repeat only when `recheck`
+	 * is not set. */
 	eventId?: string;
 	/** The transport envelope's id, when it differs from `eventId`. */
 	transportId?: string;
+	/** Set (to `true`) only when the client asks again about a request it has
+	 * already said yes to, because its task waited. Absent when the request
+	 * arrives. */
+	recheck?: boolean;
 }
 
 export type AgxAuthorize = (
@@ -89,7 +96,21 @@ export interface AgxClientOptions {
 	 * can reach this agent, so authorization is DEFAULT-DENY: omitting this hook drops
 	 * every task request (and logs a one-time warning). Pass an `authorize` function
 	 * to gate per `{ from, capability }`, or the explicit sentinel `"accept-all"` to
-	 * accept every peer deliberately. */
+	 * accept every peer deliberately.
+	 *
+	 * The hook can be asked about the same request more than once. A task that
+	 * waited (in the queue for a free slot, or for its requester's input) is asked
+	 * about again, with the same context plus `recheck: true`, just before its
+	 * handler starts or goes on; and so is a task whose wait for input ended
+	 * without an answer, before its handler gets the error. Give the same answer
+	 * each time unless the owner has changed their mind, and keep no one-shot side
+	 * effects in the hook; a host that records handled requests can tell a second
+	 * ask by `recheck`. A task that starts at once is asked about once, and a
+	 * handler that is already running is not stopped.
+	 *
+	 * A `false` (or a throw) on the second ask ends the task the way it does at
+	 * intake: no reply, and the request goes to `onMessage`. Such a request may
+	 * already have had an `input-required` result sent for it. */
 	authorize?: AgxAuthorize | "accept-all";
 	logger?: AgxLogger;
 	/** Discovery metadata advertised on `start()`. */
@@ -182,14 +203,16 @@ const MAX_QUEUED_TASK_RUNS = 100;
 const INPUT_UNSUPPORTED_ERROR =
 	"AGX task requires input; this request does not support interactive input";
 const INPUT_CANCELLED_ERROR = "AGX task was canceled by its requester";
+const INPUT_TURNED_DOWN_ERROR =
+	"AGX task was turned down: authorize no longer allows it";
 const STREAM_HANDLE_UPDATE = Symbol("stream update");
 const STREAM_HANDLE_ERROR = Symbol("stream error");
 
 class AgxTaskQueueFull extends Error {}
 
 class AgxTaskCanceled extends Error {
-	constructor() {
-		super(INPUT_CANCELLED_ERROR);
+	constructor(message = INPUT_CANCELLED_ERROR) {
+		super(message);
 	}
 }
 /** Default {@link AgxClientOptions.pollOverlapSec}. Exported for hosts that keep
@@ -1447,7 +1470,7 @@ export class AgxClient {
 		};
 		try {
 			const scheduled = this.scheduleTask(
-				(onInputRequired, releaseSlot, acquireSlot) =>
+				(onInputRequired, releaseSlot, acquireSlot, waited) =>
 					this.runTask(
 						msg,
 						env,
@@ -1456,6 +1479,7 @@ export class AgxClient {
 						onInputRequired,
 						releaseSlot,
 						acquireSlot,
+						waited,
 					),
 				env.taskId,
 			);
@@ -1471,6 +1495,60 @@ export class AgxClient {
 		}
 	}
 
+	/** Ask `authorize` again about a task that waited, just before its handler
+	 * starts or goes on. True means carry on. Anything but a clear yes is a no
+	 * (default-deny), including a hook that throws or no hook at all. A no is
+	 * handled as at intake: nothing is sent to the peer, and the request goes to
+	 * `onMessage`. The caller ends the task. */
+	private async stillAuthorized(
+		msg: AgxIncomingMessage,
+		env: TaskRequestEnvelope,
+	): Promise<boolean> {
+		if (this.authorize === "accept-all") {
+			return true;
+		}
+		let allowed = false;
+		if (typeof this.authorize === "function") {
+			try {
+				allowed = Boolean(
+					await this.authorize({
+						from: msg.from,
+						capability: env.capability,
+						eventId: msg.eventId,
+						transportId: msg.transportId,
+						recheck: true,
+					}),
+				);
+			} catch (error) {
+				this.log.error?.("AGX: authorize failed for a waiting task; denying it", {
+					taskId: env.taskId,
+					capability: env.capability,
+					from: msg.from,
+					error: String(error),
+				});
+			}
+		}
+		if (allowed) {
+			return true;
+		}
+		this.log.info?.("AGX: task rejected by authorize", {
+			from: msg.from,
+			capability: env.capability,
+			taskId: env.taskId,
+		});
+		try {
+			await this.onMessage?.(msg);
+		} catch (error) {
+			// Too late to retry the request, and the peer must not hear about it.
+			this.log.error?.("AGX: onMessage failed for a task turned down while waiting", {
+				taskId: env.taskId,
+				from: msg.from,
+				error: String(error),
+			});
+		}
+		return false;
+	}
+
 	/** Resolves once no task handler is running outside `pump()`. */
 	async tasksSettled(): Promise<void> {
 		while (this.runningTasks.size > 0) {
@@ -1483,6 +1561,8 @@ export class AgxClient {
 			onInputRequired: () => void,
 			releaseSlot: () => void,
 			acquireSlot: () => Promise<void>,
+			/** True when the task had to wait in the queue before it could start. */
+			waited: boolean,
 		) => Promise<void>,
 		taskId: string,
 	): {
@@ -1505,6 +1585,7 @@ export class AgxClient {
 		const scheduled = { completion, inputRequired, started };
 		this.runningTasks.add(completion);
 
+		let waited = false;
 		let holdingSlot = false;
 		const releaseSlot = () => {
 			if (!holdingSlot) return;
@@ -1555,7 +1636,7 @@ export class AgxClient {
 			void run(() => {
 				releaseSlot();
 				resolveInputRequired();
-			}, releaseSlot, acquireSlot)
+			}, releaseSlot, acquireSlot, waited)
 				.catch((err) =>
 					this.log.error?.("AGX: task failed outside its handler", {
 						taskId,
@@ -1584,6 +1665,7 @@ export class AgxClient {
 				resolveCompletion();
 				throw new AgxTaskQueueFull("AGX task queue is full");
 			}
+			waited = true;
 			this.queuedTaskRuns.push({ start, cancel });
 		}
 		return scheduled;
@@ -1598,6 +1680,7 @@ export class AgxClient {
 		onInputRequired: () => void,
 		releaseSlot: () => void,
 		acquireSlot: () => Promise<void>,
+		waited: boolean,
 	): Promise<void> {
 		const active = this.activeInboundTasks.get(
 			this.activeInboundTaskKey(this.normalizeId(msg.from), env.taskId),
@@ -1608,6 +1691,13 @@ export class AgxClient {
 				: undefined;
 		let waitingForInput = false;
 		try {
+			// A task that waited for its turn is asked about again before it runs: the
+			// owner may have changed their mind since intake. One that started at
+			// once was authorized a moment ago, so it is not asked twice. One the
+			// requester already canceled is not asked at all. The cancel check is
+			// repeated after the ask, so a cancel that arrives meanwhile still counts.
+			if (active?.canceled) return;
+			if (waited && !(await this.stillAuthorized(msg, env))) return;
 			if (active?.canceled) return;
 			const output = await handler(task, {
 				from: msg.from,
@@ -1678,8 +1768,31 @@ export class AgxClient {
 					}
 					onInputRequired();
 					try {
-						const input = await inputPromise;
+						let input: unknown;
+						try {
+							input = await inputPromise;
+						} catch (error) {
+							// The wait ended with no answer (it timed out, the requirement
+							// was not sent, or the client is stopping), and the handler is
+							// about to get an error it may carry on from. Not asked again
+							// when the requester canceled.
+							if (
+								!(error instanceof AgxTaskCanceled) &&
+								!active?.canceled &&
+								!(await this.stillAuthorized(msg, env))
+							) {
+								if (active) active.canceled = true;
+								throw new AgxTaskCanceled(INPUT_TURNED_DOWN_ERROR);
+							}
+							throw error;
+						}
 						await acquireSlot();
+						if (!(await this.stillAuthorized(msg, env))) {
+							// Ends like a cancel: even a handler that catches this error gets
+							// no result sent for it, and cannot ask for input again.
+							if (active) active.canceled = true;
+							throw new AgxTaskCanceled(INPUT_TURNED_DOWN_ERROR);
+						}
 						if (active?.canceled) {
 							throw new AgxTaskCanceled();
 						}
