@@ -84,6 +84,34 @@ import { AGX_CLI_VERSION } from "./lib/version.js";
 const CATEGORY_HELP =
 	"category slug (repeatable): finance, sales, marketing, customer-support, hr, legal, operations, engineering, devops, data, research, productivity, communication, commerce, security";
 
+/**
+ * An unknown-command or unknown-option parser error (the two that quote only the
+ * typed token) whose token holds a run of 56 or more hex digits, in any case. 56
+ * rather than exactly 64 so a key pasted a few digits short, long or doubled is
+ * hidden too, while a 40-digit commit id and a 55-digit run stay visible. Matched
+ * anywhere in the token, so also behind `--`, `-`, a quote or a line break, or
+ * with `=value` after it. A real command or option name never holds such a run.
+ * NOT handled, by choice: a key with a separator inside it (dash, space,
+ * zero-width character), which breaks the run. This is the narrow part of the
+ * open question whether agx should hide ANY long hex string (issue #57): every
+ * other parser error, including "too many arguments" that shows a hex public key,
+ * is left as it is.
+ */
+const UNKNOWN_NAME_WITH_HEX_KEY = /^error: unknown (?:command|option) '[\s\S]*[0-9a-f]{56,}/i;
+
+/**
+ * The "too many arguments" parser error, which quotes EVERY extra word typed. Only
+ * `gateway` gets this match (see where it is set): it is the one command with its own
+ * action and subcommands, so there a mistyped subcommand word is "too many arguments",
+ * not "unknown command". Everywhere else this error may legitimately show a hex public
+ * key (`agx send <pubkey> hello world`), which is the open question of issue #57.
+ */
+const EXCESS_ARGUMENTS_WITH_HEX_KEY = /^error: too many arguments[\s\S]*[0-9a-f]{56,}/i;
+
+/** Printed instead of a parser error that quotes a long hex string where a command or option name belongs. */
+const PARSER_ERROR_WITH_HEX_KEY =
+	"error: a long hex string that may be a secret key sits where a command or option name belongs, so the error that quotes it is not shown. Check the arguments with `agx --help`.\n";
+
 /** Printed instead of a parser error that quotes a secret key. */
 const PARSER_ERROR_WITH_SECRET_KEY =
 	"error: the command line contains a secret key (nsec1…), so the error that quotes it is not shown. Check the arguments with `agx --help`.\n";
@@ -104,14 +132,28 @@ export function buildProgram(): Command {
 	// Set before any subcommand exists: subcommands copy it when created.
 	program.exitOverride();
 
+	/**
+	 * What to print for a parser error: the text itself, or a fixed message when it quotes a
+	 * secret key (nsec1 first, then a hex key typed as a command or option name). The
+	 * excess-arguments match is opt-in, for `gateway` only.
+	 */
+	function parserErrorText(text: string, excessArgumentsToo = false): string {
+		if (holdsSecretKey(text)) {
+			return PARSER_ERROR_WITH_SECRET_KEY;
+		}
+		if (UNKNOWN_NAME_WITH_HEX_KEY.test(text) || (excessArgumentsToo && EXCESS_ARGUMENTS_WITH_HEX_KEY.test(text))) {
+			return PARSER_ERROR_WITH_HEX_KEY;
+		}
+		return text;
+	}
+
 	// The parser writes its own usage errors straight to stderr and quotes what was typed
 	// (`unknown command '<arg>'`, `too many arguments …: <all args>`), so they never pass
 	// through redactSecrets. A secret key typed where a command or argument belongs must
 	// not come back: the message is replaced, not edited, so no part of it survives.
+	// A long hex string (56+ digits) typed as a command or option name gets the same treatment.
 	// Set before any subcommand exists: subcommands copy it when created.
-	program.configureOutput({
-		outputError: (text, write) => write(holdsSecretKey(text) ? PARSER_ERROR_WITH_SECRET_KEY : text),
-	});
+	program.configureOutput({ outputError: (text, write) => write(parserErrorText(text)) });
 
 	program
 		.name("agx")
@@ -609,6 +651,9 @@ export function buildProgram(): Command {
 		.command("revoke <id>")
 		.description("revoke an API key; a running gateway refuses it at once")
 		.action((id: string, options) => gatewayKeyRevokeCommand(id, withGlobals(options)));
+	// Only now, after `key` and its subcommands exist: configureOutput builds a NEW object, and
+	// commands created earlier keep the root's, so `gateway key new <hex>` is deliberately unchanged.
+	gateway.configureOutput({ outputError: (text, write) => write(parserErrorText(text, true)) });
 
 	program
 		.command("inbox")
