@@ -27,7 +27,8 @@ beforeEach(async () => {
 	clock = fakeClock();
 	restoreClock = useClock(clock);
 	mock = await startMockIndexServer({ now: clock.now });
-	updateProfile("default", { apiBaseUrl: mock.origin, orgSlug: "acme-robotics" });
+	// No relays: `agx doctor` would otherwise probe ws://127.0.0.1:7447.
+	updateProfile("default", { apiBaseUrl: mock.origin, orgSlug: "acme-robotics", relays: [] });
 });
 
 afterEach(async () => {

@@ -2,7 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
+import { profileSchema } from "../lib/config.js";
 import { runtime, setRuntimeForTests } from "../lib/runtime.js";
+import { failTestsThatConnect } from "./default-relay-guard.js";
 
 /**
  * Runs before every test file. No test may ever read or write the real
@@ -45,6 +47,18 @@ setRuntimeForTests({
 		return realFetch(input, init);
 	},
 });
+
+/**
+ * A stock profile's relay is `agx relay` on this machine (`ws://127.0.0.1:7447`).
+ * A machine that runs one would answer a test that leaves that default in
+ * place, so the result would depend on the machine. Nothing in the suite may
+ * connect to that port: the connection is refused like a closed port and the
+ * test that tried fails. A test that needs a relay sets the profile's `relays`
+ * itself, to one it starts on port 0 (or to none).
+ */
+failTestsThatConnect(
+	profileSchema.parse({}).relays.map((url) => Number(new URL(url).port)),
+);
 
 afterAll(() => {
 	rmSync(home, { recursive: true, force: true });
