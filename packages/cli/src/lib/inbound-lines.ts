@@ -99,15 +99,18 @@ export function bodyLines(text: string): string[] {
 }
 
 /** Replace control characters (C0 except tab, DEL, C1) — ESC among them, so no
- * ANSI sequence survives — and the U+2028/U+2029 separators with U+FFFD.
- * Visible, never interpreted, never a line break. For single-line fields a peer
- * controls (contextId, taskId, a receipt's refEventId). */
+ * ANSI sequence survives — the U+2028/U+2029 separators and the bidirectional
+ * formatting controls (U+202A–U+202E, U+2066–U+2069) with U+FFFD.
+ * Visible, never interpreted, never a line break, never a change of text
+ * direction. For single-line fields a peer controls (contextId, taskId, a
+ * receipt's refEventId). */
 export function neutralizeControls(value: string): string {
 	return value.replace(CONTROL_RE, "\uFFFD");
 }
 
 /** For a multi-line body: keeps newlines and tabs, normalises CRLF/CR to LF, and
- * replaces the other control characters, C1 and U+2028/U+2029 with U+FFFD. */
+ * replaces the other control characters, C1, U+2028/U+2029 and the bidirectional
+ * formatting controls with U+FFFD. */
 export function neutralizeBodyControls(value: string): string {
 	return value.replace(/\r\n?/g, "\n").replace(BODY_CONTROL_RE, "\uFFFD");
 }
@@ -127,6 +130,6 @@ const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
 /** Ids agx mints (hex, UUIDs) and common peer formats; nothing a shell expands. */
 const SAFE_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
-const CONTROL_RE = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/g;
+const CONTROL_RE = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
-const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/g;
+const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;

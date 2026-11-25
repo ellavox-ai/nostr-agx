@@ -95,6 +95,14 @@ describe("messages", () => {
 		expect(stored?.text).toBe("l1\nl2�[2Jx�y\ttab");
 	});
 
+	it("neutralizes the bidirectional formatting controls in a stored subject and body", () => {
+		const store = open();
+		store.addInbound(msg({ subject: "a\u202eb\u2066c", text: "x\u202ey\u2069z\ntab\there \u05e9\u05dc\u05d5\u05dd" }));
+		const [stored] = store.listMessages();
+		expect(stored?.subject).toBe("a\uFFFDb\uFFFDc");
+		expect(stored?.text).toBe("x\uFFFDy\uFFFDz\ntab\there \u05e9\u05dc\u05d5\u05dd");
+	});
+
 	it("withholds an unsafe contextId instead of storing it", () => {
 		const store = open();
 		store.addInbound(msg({ contextId: "x; rm -rf ~" }));
@@ -171,6 +179,13 @@ describe("held senders", () => {
 		store.flush();
 		expect(statSync(join(dir, HELD_FILE)).mode & 0o777).toBe(0o600);
 		expect(open().listHeld()[0]?.messages).toHaveLength(2);
+	});
+
+	it("replaces bidirectional formatting controls in a held sender's text", () => {
+		const store = open();
+		expect(store.hold(MALLORY, msg({ id: "hb", text: "x\u202ey\u2069z" }))).toBe("kept");
+		const [held] = store.listHeld();
+		expect(held?.messages.map((m) => m.text)).toEqual(["x�y�z"]);
 	});
 
 	it("never mixes held text into the history", () => {
