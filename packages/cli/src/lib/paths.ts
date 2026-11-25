@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	closeSync,
 	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	renameSync,
@@ -20,8 +21,9 @@ import { dirname, join } from "node:path";
  *
  *   - `0700` on the directory, `0600` on every file. `writeFileSync`'s `mode` is
  *     ignored when the file already exists, so every write chmods explicitly.
- *   - Writes are atomic (tmp + rename). `agx serve` rewrites its cursor after
- *     every poll; a torn write there would strand the inbox.
+ *   - Writes are atomic (tmp + rename; tmp + link for a write that must not
+ *     replace a file). `agx serve` rewrites its cursor after every poll; a torn
+ *     write there would strand the inbox.
  *
  *   ~/.agx/
  *     config.json                         profiles: API base, org, relays, allowlist
@@ -129,7 +131,37 @@ export interface PrivateWriteOptions {
 	 * with the machine, turns this off.
 	 */
 	sync?: boolean;
+	/**
+	 * Create the file only if nothing is there at the moment it is written
+	 * (default false: replace what is there). Throws `PrivateFileExistsError`
+	 * when something is. For a file whose old content must not be lost to a
+	 * writer that checked for it a moment too early, such as a secret key.
+	 */
+	exclusive?: boolean;
 }
+
+/** An exclusive write found the file already there. Holds the path, never the content. */
+export class PrivateFileExistsError extends Error {
+	constructor(readonly path: string) {
+		super(`${path} already exists.`);
+		this.name = "PrivateFileExistsError";
+	}
+}
+
+/**
+ * An exclusive write could not be made because the file system under the target
+ * cannot make hard links (EPERM on Linux vfat, ENOTSUP on macOS FAT, EOPNOTSUPP,
+ * ENOSYS). Nothing was written. Holds the path, never the content.
+ */
+export class HardLinksUnavailableError extends Error {
+	constructor(readonly path: string) {
+		super(`${dirname(path)} is on a file system that cannot make hard links.`);
+		this.name = "HardLinksUnavailableError";
+	}
+}
+
+/** The codes `link()` gives when the file system cannot make hard links at all. */
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 /**
  * Atomic, private write of text (JSON-lines files use this directly).
@@ -141,7 +173,7 @@ export interface PrivateWriteOptions {
 export function writePrivateText(
 	path: string,
 	text: string,
-	{ sync = true }: PrivateWriteOptions = {},
+	{ sync = true, exclusive = false }: PrivateWriteOptions = {},
 ): void {
 	ensureDir(dirname(path));
 	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -157,7 +189,29 @@ export function writePrivateText(
 				closeSync(fd);
 			}
 		}
-		renameSync(tmp, path);
+		if (exclusive) {
+			// link() creates `path` complete, with the temp file's content and mode, or
+			// fails with EEXIST when something is already there. rename() would replace it.
+			try {
+				linkSync(tmp, path);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code ?? "";
+				if (code === "EEXIST") {
+					throw new PrivateFileExistsError(path);
+				}
+				if (NO_HARD_LINKS.has(code)) {
+					throw new HardLinksUnavailableError(path);
+				}
+				throw error;
+			}
+			try {
+				unlinkSync(tmp);
+			} catch {
+				// `path` is in place and whole. A temp name that stays behind must not turn a finished write into a failure.
+			}
+		} else {
+			renameSync(tmp, path);
+		}
 	} catch (error) {
 		rmSync(tmp, { force: true });
 		throw error;
