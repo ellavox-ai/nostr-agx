@@ -18,6 +18,7 @@ import {
 } from "./errors.js";
 import { notice } from "./output.js";
 import { configPath, writePrivateJson } from "./paths.js";
+import { isPastedSecretKey } from "./peer.js";
 import { runtime } from "./runtime.js";
 import {
 	isWellFormedApiKey,
@@ -222,9 +223,47 @@ function migrateLegacyKeys(
 	return config;
 }
 
+/** Where a typed profile name came from. It decides the wording of a refusal. */
+export type ProfileNameSource = "flag" | "env" | "argument";
+
+const PROFILE_NAME_REFUSAL: Record<ProfileNameSource, { given: string; fix: string }> = {
+	flag: {
+		given: "with -p/--profile",
+		fix: "Use a short name, for example:  agx -p work identity new",
+	},
+	env: {
+		given: "in the AGX_PROFILE environment variable",
+		fix: "Unset it, or set a short name:  unset AGX_PROFILE  (or  export AGX_PROFILE=work)",
+	},
+	argument: {
+		given: "to `agx config use`",
+		fix: "Use a short name, for example:  agx config use work",
+	},
+};
+
+/**
+ * A profile name is printed back by almost every command and becomes a folder
+ * name under AGX_HOME, so a secret key pasted there by mistake must be refused
+ * before it is printed or written. The message never contains the value.
+ */
+export function refuseSecretKeyAsProfileName(name: string, source: ProfileNameSource): void {
+	if (isPastedSecretKey(name)) {
+		const { given, fix } = PROFILE_NAME_REFUSAL[source];
+		throw usageError(
+			`The profile name given ${given} is a secret key (nsec1…), so it is not used and not shown here.`,
+			fix,
+		);
+	}
+}
+
 /** Resolve the active profile name: flag, then env, then the stored default. */
 export function resolveProfileName(flag?: string): string {
-	return flag ?? process.env.AGX_PROFILE ?? loadConfig().currentProfile;
+	const typed = flag ?? process.env.AGX_PROFILE;
+	if (typed !== undefined) {
+		refuseSecretKeyAsProfileName(typed, flag !== undefined ? "flag" : "env");
+		return typed;
+	}
+	return loadConfig().currentProfile;
 }
 
 export function getProfile(name: string): Profile {
