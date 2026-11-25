@@ -190,8 +190,12 @@ export class MessageStore {
 		this.messagesPath = join(dir, MESSAGES_FILE);
 		this.heldPath = join(dir, HELD_FILE);
 		this.maxMessages = options.maxMessages ?? Number.POSITIVE_INFINITY;
-		const messages = readLines(this.messagesPath, messageSchema);
+		// Read in the opposite order to `flush()`, which writes the history, then the held list,
+		// then deletes the queued files. A reader that read the history first and the queue last
+		// could miss a change that moved between them while it was reading: in neither place.
+		const queued = this.readSpool();
 		const held = readLines(this.heldPath, heldSchema);
+		const messages = readLines(this.messagesPath, messageSchema);
 		// In time order, as every insert keeps them (a stable sort: equal times
 		// keep their order).
 		this.messages = messages.records.sort((a, b) => a.at.localeCompare(b.at));
@@ -201,11 +205,11 @@ export class MessageStore {
 		this.heldUnknown = held.unknown;
 		this.enforceHeldLimits();
 		if (options.claimSpool === true) {
-			this.absorbSpool();
+			this.applySpool(queued);
 		} else {
 			// A reader sees pending changes but writes nothing.
 			const { messagesDirty, heldDirty } = this;
-			this.absorbSpool();
+			this.applySpool(queued);
 			this.claimed = [];
 			this.messagesDirty = messagesDirty;
 			this.heldDirty = heldDirty;
@@ -250,25 +254,40 @@ export class MessageStore {
 		}
 	}
 
-	/** Apply what other commands queued; `flush()` removes the files once the result is written. */
-	absorbSpool(): void {
+	/** Read what other commands queued, without applying it. */
+	private readSpool(): { file: string; op: SpoolOp }[] {
+		const queued: { file: string; op: SpoolOp }[] = [];
 		for (const file of this.spoolFiles()) {
 			if (this.claimed.includes(file)) {
 				continue;
 			}
 			try {
 				const op = spoolOpSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
-				if (!op.success) {
-					// Not understood (a newer version wrote it): leave it in place.
-					continue;
+				if (op.success) {
+					queued.push({ file, op: op.data });
 				}
-				this.applyOp(op.data);
+				// Otherwise not understood (a newer version wrote it): leave it in place.
 			} catch {
 				// Unreadable: leave it too.
+			}
+		}
+		return queued;
+	}
+
+	private applySpool(queued: { file: string; op: SpoolOp }[]): void {
+		for (const { file, op } of queued) {
+			try {
+				this.applyOp(op);
+			} catch {
 				continue;
 			}
 			this.claimed.push(file);
 		}
+	}
+
+	/** Apply what other commands queued; `flush()` removes the files once the result is written. */
+	absorbSpool(): void {
+		this.applySpool(this.readSpool());
 	}
 
 	private has(id: string): boolean {
