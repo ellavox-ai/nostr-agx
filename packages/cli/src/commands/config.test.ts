@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getProfile, loadConfig, resolveProfileName, saveProfile } from "../lib/config.js";
 import { getCredential } from "../lib/credentials.js";
+import { createIdentity } from "../lib/identity.js";
 import { setRuntimeForTests } from "../lib/runtime.js";
 import { setStdinForTests } from "../lib/stdin.js";
 import { agx, type CliRun, capture, jsonDocuments, sandbox } from "../test/helpers.js";
@@ -347,5 +349,90 @@ describe("agx config set apiBaseUrl", () => {
 		const refused = await agx("search", "x");
 		expect(refused.code).toBe(3);
 		expect(refused.stderr).not.toMatch(/--stdin/);
+	});
+});
+
+describe("which profile is active", () => {
+	const RELAY = "ws://127.0.0.1:9";
+
+	/** The profile `agx config show` describes when no profile is named. */
+	async function active(): Promise<string> {
+		const run = await agx("config", "show", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		return (jsonDocuments(run.stdout)[0] as { profile: string }).profile;
+	}
+
+	async function listed(): Promise<{ current: string; profiles: string[] }> {
+		const run = await agx("config", "list", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		return jsonDocuments(run.stdout)[0] as { current: string; profiles: string[] };
+	}
+
+	it("a fresh home has the default profile active", async () => {
+		expect(await active()).toBe("default");
+		expect(await listed()).toEqual({ current: "default", profiles: [] });
+	});
+
+	it("saving a named profile on a fresh home leaves the default profile active", async () => {
+		const run = await agx("--profile", "work", "config", "set", "relays", RELAY);
+		expect(run.code, run.stderr).toBe(0);
+		expect(await active()).toBe("default");
+		expect(await listed()).toEqual({ current: "default", profiles: ["work"] });
+		expect(JSON.parse(readFileSync(join(box.home, "config.json"), "utf8")).currentProfile).toBe("default");
+	});
+
+	it("saving the allowlist of a named profile on a fresh home leaves the default profile active", async () => {
+		const peer = createIdentity().npub;
+		const run = await agx("--profile", "work", "identity", "allow", peer);
+		expect(run.code, run.stderr).toBe(0);
+		expect(await active()).toBe("default");
+		expect((await listed()).current).toBe("default");
+	});
+
+	it("saveProfile alone does not change the stored active profile", () => {
+		saveProfile("work", { ...getProfile("work"), relays: [RELAY] });
+		expect(loadConfig().currentProfile).toBe("default");
+		expect(resolveProfileName()).toBe("default");
+		expect(loadConfig().profiles.work?.relays).toEqual([RELAY]);
+	});
+
+	it("still saves the named profile's own settings", async () => {
+		await agx("--profile", "work", "config", "set", "relays", RELAY);
+		await agx("--profile", "work", "config", "set", "org", "Work Org");
+		const run = await agx("--profile", "work", "config", "show", "--json");
+		expect(run.code, run.stderr).toBe(0);
+		expect(jsonDocuments(run.stdout)[0]).toMatchObject({ profile: "work", relays: [RELAY], org: "Work Org" });
+	});
+
+	it("config use makes the named profile active, creating it, and nothing but config use changes that", async () => {
+		const use = await agx("config", "use", "work");
+		expect(use.code, use.stderr).toBe(0);
+		expect(await active()).toBe("work");
+		expect(await listed()).toEqual({ current: "work", profiles: ["work"] });
+		await agx("--profile", "other", "config", "set", "relays", RELAY);
+		expect(await active()).toBe("work");
+		expect((await agx("config", "use", "other")).code).toBe(0);
+		expect(await active()).toBe("other");
+	});
+
+	it("saving the active profile keeps it active", async () => {
+		await agx("config", "use", "work");
+		expect((await agx("--profile", "work", "config", "set", "relays", RELAY)).code).toBe(0);
+		expect(await active()).toBe("work");
+		expect((await listed()).current).toBe("work");
+	});
+
+	it("saving a profile other than the active one keeps the active one", async () => {
+		await agx("config", "use", "main");
+		expect((await agx("--profile", "other", "config", "set", "relays", RELAY)).code).toBe(0);
+		expect((await agx("--profile", "third", "identity", "allow", createIdentity().npub)).code).toBe(0);
+		expect(await active()).toBe("main");
+		expect(await listed()).toEqual({ current: "main", profiles: ["main", "other", "third"] });
+	});
+
+	it("saving the default profile on a fresh home keeps it active and lists it", async () => {
+		expect((await agx("config", "set", "orgSlug", "acme")).code).toBe(0);
+		expect(await active()).toBe("default");
+		expect(await listed()).toEqual({ current: "default", profiles: ["default"] });
 	});
 });
