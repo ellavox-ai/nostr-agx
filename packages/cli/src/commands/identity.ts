@@ -1,3 +1,4 @@
+import { normalizePubkey, toNpub } from "@nostr-agx/nostr";
 import kleur from "kleur";
 import {
 	effectiveProfile,
@@ -209,8 +210,32 @@ export function identityAllowListCommand(options: IdentityOptions): void {
 		);
 		say(kleur.dim("  agx identity allow <npub>"));
 	}
-	for (const hex of profile.allow) {
-		say(`  ${toDisplayNpub(hex)}`);
+	// An entry that is not a valid peer key may be a secret key pasted in by
+	// mistake, so it is named by its place in the list (counted from 1, as
+	// `agx doctor` counts) and its text is never printed. A peer key is 32 bytes
+	// (64 hex characters); `normalizePubkey` also accepts an npub that carries
+	// another number of bytes, so the length is checked here.
+	const allow: string[] = [];
+	const invalidPositions: number[] = [];
+	for (const [index, entry] of profile.allow.entries()) {
+		const hex = normalizePubkey(entry);
+		if (hex === null || hex.length !== 64) {
+			invalidPositions.push(index + 1);
+			say(
+				`  ${kleur.yellow("!")} entry #${index + 1} is not a valid peer key and is not shown`,
+			);
+			continue;
+		}
+		const npub = toNpub(hex);
+		allow.push(npub);
+		say(`  ${npub}`);
 	}
-	json({ allow: profile.allow.map(toDisplayNpub) });
+	if (invalidPositions.length > 0) {
+		say(
+			kleur.dim(
+				'  To fix this, edit "allow" in config.json (agx config path shows where it is).',
+			),
+		);
+	}
+	json(invalidPositions.length === 0 ? { allow } : { allow, invalidPositions });
 }
