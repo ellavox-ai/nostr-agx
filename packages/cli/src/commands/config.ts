@@ -1,3 +1,4 @@
+import { normalizePubkey } from "@nostr-agx/nostr";
 import {
 	BEST_EFFORT_RPC_TIMEOUT_MS,
 	createApiClient,
@@ -114,7 +115,28 @@ export function configShowCommand(options: ConfigOptions): void {
 	kv("nip05", profile.nip05);
 	kv("allow", `${profile.allow.length} peer(s)`);
 	kv("file", configPath());
-	json({ profile: profileName, ...profile, credentials });
+	// An entry of `allow` that is not a valid peer key may be a secret key pasted in
+	// by mistake, so `--json` leaves it out and names it by its place in the saved
+	// list (counted from 1, as `agx doctor` counts) instead of printing its text. A
+	// peer key is 32 bytes (64 hex characters); `normalizePubkey` also accepts an
+	// npub that carries another number of bytes, so the length is checked here.
+	const allow: string[] = [];
+	const invalidPositions: number[] = [];
+	for (const [index, entry] of profile.allow.entries()) {
+		const hex = normalizePubkey(entry);
+		if (hex === null || hex.length !== 64) {
+			invalidPositions.push(index + 1);
+		} else {
+			allow.push(entry);
+		}
+	}
+	json({
+		profile: profileName,
+		...profile,
+		allow,
+		credentials,
+		...(invalidPositions.length > 0 ? { invalidPositions } : {}),
+	});
 }
 
 async function setApiKey(
