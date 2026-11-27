@@ -365,6 +365,10 @@ agx wait --timeout 600          # return existing unread mail, or wait for one a
 agx wait --summary --json       # counts only: safe for a background-task notification
 ```
 
+`--summary` also works while `agx serve` is running on the same profile: it pulls nothing, prints the counts
+`serve` has stored (`0 new · 5 unread · 1 held · pull held by another process`) and exits `0`, so a hook can run
+beside a listener. `agx inbox` without `--summary`, and `agx wait`, still need the profile to themselves and exit `1` while `serve` holds it.
+
 `wait` uses the same inbox trust, history and cursor rules. It first returns unread allowed
 messages. Otherwise it polls until an allowed message, held activity or receipt arrives, then
 prints one batch and exits. A quiet healthy timeout exits `0` with `timedOut: true` in JSON;

@@ -52,6 +52,8 @@ export interface InboxSummary {
 	relays: { ok: number; unreachable: number };
 	/** Present for `agx wait`; ordinary one-shot inbox output is unchanged. */
 	timedOut?: boolean;
+	/** Present, and `true`, only when another process held the profile lock: nothing was pulled. */
+	pullHeldByAnotherProcess?: true;
 }
 
 /** ISO time for a unix-seconds value, or `fallback` when the value is not a time `Date` can hold. */
@@ -186,12 +188,31 @@ export function summarize(report: InboxReport, newCount: number, unreadCount: nu
 	};
 }
 
+/**
+ * What `agx inbox --summary` prints while another process holds the profile lock
+ * and so does the pulling: the counts already in the store, nothing new, and no
+ * relay contacted (so none is counted as reachable or not).
+ */
+export function storeSummary(store: MessageStore): InboxSummary {
+	return {
+		schema: INBOX_SUMMARY_SCHEMA,
+		new: 0,
+		unread: store.listMessages({ direction: "in", unreadOnly: true }).length,
+		held: store.listHeld().length,
+		relays: { ok: 0, unreachable: 0 },
+		pullHeldByAnotherProcess: true,
+	};
+}
+
 /** `3 new · 5 unread · 1 held`, with `· 1 relay unreachable` when some relays failed. */
 export function summaryLine(summary: InboxSummary): string {
 	const parts = [`${summary.new} new`, `${summary.unread} unread`, `${summary.held} held`];
 	const down = summary.relays.unreachable;
 	if (down > 0) {
 		parts.push(`${down} ${down === 1 ? "relay" : "relays"} unreachable`);
+	}
+	if (summary.pullHeldByAnotherProcess === true) {
+		parts.push("pull held by another process");
 	}
 	if (summary.timedOut === true) {
 		parts.push("timed out");

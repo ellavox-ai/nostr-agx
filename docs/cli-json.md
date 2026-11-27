@@ -28,7 +28,7 @@ One-shot pull since the stored cursor, then exit. It never replies and never run
 | `--json` | The schema below (global flag) |
 | `--no-color` | No ANSI colour |
 
-Exit codes: `0` when at least one relay answered, `5` when none did, `3` when there is no identity, `1` when another `agx serve`, `agx inbox` or `agx wait` holds the profile lock.
+Exit codes: `0` when at least one relay answered, `5` when none did, `3` when there is no identity, `1` when another `agx serve`, `agx inbox` or `agx wait` holds the profile lock (`--summary` is the exception: see below).
 
 ### `--summary`
 
@@ -40,10 +40,24 @@ One line:
 
 `new` is what arrived in this pull; `unread` is every inbound message not yet marked read (`agx thread <id> --mark-read`), so a quiet pull does not hide mail you have not read. With `· 1 relay unreachable` appended when some relays fail (`· 2 relays unreachable` for more). It is the only output a hook should show without review.
 
+**While another process holds the profile lock** (a running `agx serve`, for example), `--summary` pulls nothing. It reads the counts from the store, exits `0` and ends the line with `· pull held by another process`:
+
+```text
+0 new · 5 unread · 1 held · pull held by another process
+```
+
+`new` is `0` because this run pulled nothing; `unread` and `held` are what the other process has stored so far, including a thread marked read that it has not yet applied. No relay is contacted, so `relays` is `{ "ok": 0, "unreachable": 0 }`. A hook can therefore run next to `agx serve` on the same profile. Plain `agx inbox` (without `--summary`) and `agx wait` (with or without `--summary`) still exit `1` while the lock is held.
+
 ### `--summary --json`: `agx.inbox.summary/1`
 
 ```json
 { "schema": "agx.inbox.summary/1", "new": 3, "unread": 5, "held": 1, "relays": { "ok": 1, "unreachable": 1 } }
+```
+
+While another process holds the profile lock, the document adds `pullHeldByAnotherProcess` (present, and `true`, only then):
+
+```json
+{ "schema": "agx.inbox.summary/1", "new": 0, "unread": 5, "held": 1, "relays": { "ok": 0, "unreachable": 0 }, "pullHeldByAnotherProcess": true }
 ```
 
 ### `--json`: `agx.inbox/1`

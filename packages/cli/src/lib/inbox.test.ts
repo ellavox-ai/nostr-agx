@@ -11,6 +11,7 @@ import {
 	INBOX_SCHEMA,
 	type InboxReport,
 	renderInboxLines,
+	storeSummary,
 	summarize,
 	summaryLine,
 } from "./inbox";
@@ -236,6 +237,31 @@ describe("summary", () => {
 		);
 		expect(json).not.toContain("npub");
 		expect(json).not.toContain(SECRET);
+	});
+
+	it("counts unread inbound mail and held senders from the store, and says nothing was pulled", () => {
+		const at = NOW.toISOString();
+		store.addInbound({ id: "i1", peer: BOB, subject: null, contextId: "c1", text: SECRET, at });
+		store.addInbound({ id: "i2", peer: BOB, subject: null, contextId: "c2", text: SECRET, at });
+		store.addInbound({ id: "i3", peer: BOB, subject: null, contextId: "c3", text: SECRET, at });
+		store.markRead({ ids: ["i3"] });
+		store.addOutbound({ id: "o1", peer: BOB, subject: null, contextId: "c1", text: "yo", at, deliveryStatus: "sent" });
+		store.hold(MALLORY, { id: "h1", peer: MALLORY, subject: null, contextId: null, text: SECRET, at });
+		const summary = storeSummary(store);
+		expect(summary).toEqual({
+			schema: "agx.inbox.summary/1",
+			new: 0,
+			unread: 2,
+			held: 1,
+			relays: { ok: 0, unreachable: 0 },
+			pullHeldByAnotherProcess: true,
+		});
+		expect(summaryLine(summary)).toBe("0 new · 2 unread · 1 held · pull held by another process");
+		expect(JSON.stringify(summary)).not.toContain(SECRET);
+	});
+
+	it("leaves the line unchanged when this process did the pulling", () => {
+		expect(summaryLine(summarize(report(), 0, 2))).toBe("0 new · 2 unread · 0 held");
 	});
 });
 

@@ -617,7 +617,7 @@ export function buildProgram(): Command {
 		.option("--unread", "list every unread message, not only the new ones")
 		.option("--thread <contextId>", "list one thread")
 		.option("--full-ids", "print full npubs and ids")
-		.option("--summary", "counts only, no peer text (safe for a hook)")
+		.option("--summary", "counts only, no peer text (safe for a hook; works while serve runs)")
 		.option("-v, --verbose", "log transport activity")
 		.action((options) => inboxCommand(withGlobals(options)));
 

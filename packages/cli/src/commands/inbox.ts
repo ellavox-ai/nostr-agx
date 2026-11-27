@@ -8,10 +8,11 @@ import {
 	INBOX_SCHEMA,
 	type InboxReport,
 	renderInboxLines,
+	storeSummary,
 	summarize,
 	summaryLine,
 } from "../lib/inbox.js";
-import { acquireLock } from "../lib/lock.js";
+import { acquireLock, tryAcquireLock } from "../lib/lock.js";
 import { json, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toHexPubkey } from "../lib/peer.js";
@@ -89,7 +90,17 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 	const profile = effectiveProfile(profileName);
 	const identity = loadIdentity(profileName);
 	const logger = makeLogger(options.verbose ?? false);
-	const releaseLock = acquireLock(profileName, EXIT.generic);
+	// `--summary` is what a hook runs, so it must work next to a running `agx serve`:
+	// when another process holds the lock it pulls, read the counts from the store.
+	const releaseLock = options.summary && !control.activity
+		? tryAcquireLock(profileName)
+		: acquireLock(profileName, EXIT.generic);
+	if (releaseLock === null) {
+		const summary = storeSummary(new MessageStore(profileDir(profileName)));
+		json(summary);
+		say(summaryLine(summary));
+		return;
+	}
 
 	try {
 		const allowed = new Set(profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")));
