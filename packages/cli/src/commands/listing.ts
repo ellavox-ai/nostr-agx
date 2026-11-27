@@ -13,6 +13,7 @@ import {
 	usageError,
 } from "../lib/errors.js";
 import { loadIdentityFile } from "../lib/identity.js";
+import { neutralizeControls } from "../lib/inbound-lines.js";
 import {
 	heading,
 	info,
@@ -121,15 +122,32 @@ function resolveListingId(
 }
 
 /**
+ * A value from the index's answer, as text for one line of output. The answer is
+ * JSON, so a field the types call a string, a number or a flag can arrive as
+ * something else, and printing it must not stop the command. Text has its
+ * control characters replaced; null and a missing value print as nothing (a
+ * dash on a line with a label); a number or a flag prints as it is; an object
+ * or a list prints as a fixed note, never its content.
+ */
+export function indexText(value: unknown): string {
+	if (typeof value === "string") {
+		return neutralizeControls(value);
+	}
+	if (typeof value === "number" || typeof value === "boolean") {
+		return String(value);
+	}
+	return value === null || value === undefined ? "" : "[not text]";
+}
+
+/**
  * `handle` is null in every public projection until the NIP-05 claim is verified
  * — an unverified handle is withheld on purpose, so rendering a blank there is
  * correct rather than a missing field.
  */
 function renderHandle(listing: PublicListing): string {
 	if (listing.handle) {
-		return listing.verified
-			? listing.handle
-			: `${listing.handle} (unverified)`;
+		const handle = indexText(listing.handle);
+		return listing.verified ? handle : `${handle} (unverified)`;
 	}
 	return "—";
 }
@@ -222,19 +240,22 @@ export async function listingCreateCommand(
 		});
 	}
 
-	ok(`Created listing ${listing.id}`);
-	kv("slug", listing.slug);
-	kv("source", listing.source);
-	kv("status", listing.status);
-	kv("visibility", listing.visibility);
-	kv("capabilities", listing.capabilities.join(", ") || "—");
+	ok(`Created listing ${indexText(listing.id)}`);
+	kv("slug", indexText(listing.slug));
+	kv("source", indexText(listing.source));
+	kv("status", indexText(listing.status));
+	kv("visibility", indexText(listing.visibility));
+	kv(
+		"capabilities",
+		neutralizeControls(listing.capabilities.join(", ")) || "—",
+	);
 	if (options.pubkey) {
 		// The server's answer, as `agx register` prints it, not the local list.
-		kv("relays", listing.relays.join(", ") || "—");
+		kv("relays", neutralizeControls(listing.relays.join(", ")) || "—");
 	}
 	say("");
 	info(
-		`Listings are born as drafts. Publish it with:  agx listing publish ${listing.id}`,
+		`Listings are born as drafts. Publish it with:  agx listing publish ${indexText(listing.id)}`,
 	);
 	if (listing.capabilities.length === 0) {
 		warn(
@@ -299,14 +320,14 @@ export async function listingListCommand(
 	} catch (error) {
 		throw toCliError(error, "searchListings", creds.baseUrl);
 	}
-	heading(`listings owned by "${creds.orgSlug}"`);
+	heading(`listings owned by "${indexText(creds.orgSlug)}"`);
 	table(
 		result.listings.map((l) => [
-			l.id,
-			l.slug,
-			l.status,
-			l.visibility,
-			l.capabilities.join(","),
+			indexText(l.id),
+			indexText(l.slug),
+			indexText(l.status),
+			indexText(l.visibility),
+			neutralizeControls(l.capabilities.join(",")),
 		]),
 		["ID", "SLUG", "STATUS", "VISIBILITY", "CAPABILITIES"],
 	);
@@ -329,19 +350,19 @@ export async function listingGetCommand(
 		throw toCliError(error, "getListing", creds.baseUrl);
 	}
 	const l = result.listing;
-	heading(l.displayName);
-	kv("id", l.id);
-	kv("slug", l.slug);
-	kv("npub", l.npub);
+	heading(indexText(l.displayName));
+	kv("id", indexText(l.id));
+	kv("slug", indexText(l.slug));
+	kv("npub", indexText(l.npub));
 	kv("handle", renderHandle(l));
 	kv("verified", l.verified ? "yes" : "no");
-	kv("status", l.status);
-	kv("visibility", l.visibility);
-	kv("capabilities", l.capabilities.join(", ") || "—");
-	kv("summary", l.summary ?? null);
+	kv("status", indexText(l.status));
+	kv("visibility", indexText(l.visibility));
+	kv("capabilities", neutralizeControls(l.capabilities.join(", ")) || "—");
+	kv("summary", indexText(l.summary));
 	if (l.status === "listed" && l.visibility !== "public") {
 		warn(
-			`Listed, but visibility is "${l.visibility}" — directory search returns public entries only, so nobody else can find it.`,
+			`Listed, but visibility is "${indexText(l.visibility)}" — directory search returns public entries only, so nobody else can find it.`,
 		);
 	}
 	json(result);
@@ -396,9 +417,12 @@ export async function listingPublishCommand(
 		throw cli;
 	}
 
-	ok(`Listing is now "${result.listing.status}".`);
-	kv("visibility", result.listing.visibility);
-	kv("capabilities", result.listing.capabilities.join(", ") || "—");
+	ok(`Listing is now "${indexText(result.listing.status)}".`);
+	kv("visibility", indexText(result.listing.visibility));
+	kv(
+		"capabilities",
+		neutralizeControls(result.listing.capabilities.join(", ")) || "—",
+	);
 
 	// An EXTERNAL listing has no server-signed Agent Card — the index never holds
 	// its key. Reporting "card published" here would be a lie.
@@ -424,7 +448,7 @@ export async function listingPublishCommand(
 	}
 	if (result.listing.visibility !== "public") {
 		warn(
-			`Visibility is "${result.listing.visibility}" — a directory search returns only public + listed entries, so other organizations still cannot find it.`,
+			`Visibility is "${indexText(result.listing.visibility)}" — a directory search returns only public + listed entries, so other organizations still cannot find it.`,
 		);
 		say(kleur.dim("  agx listing set-visibility public"));
 	}
@@ -471,7 +495,10 @@ async function waitUntilPublic(
 		if (listing.status === "listed" && listing.visibility === "public") {
 			ok("The listing is public and listed.");
 			kv("visibility", listing.visibility);
-			kv("capabilities", listing.capabilities.join(", ") || "—");
+			kv(
+				"capabilities",
+				neutralizeControls(listing.capabilities.join(", ")) || "—",
+			);
 			json({ listing, confirmed: true });
 			return;
 		}
@@ -501,7 +528,7 @@ export async function listingSetVisibilityCommand(
 	} catch (error) {
 		throw toCliError(error, "updateListing", creds.baseUrl);
 	}
-	ok(`Visibility is now "${result.visibility}".`);
+	ok(`Visibility is now "${indexText(result.visibility)}".`);
 	reportRetraction(result.cardRetractionRequested);
 	json(result);
 }
@@ -521,7 +548,7 @@ export async function listingDelistCommand(
 	} catch (error) {
 		throw toCliError(error, "delistListing", creds.baseUrl);
 	}
-	ok(`Listing is now "${result.listing.status}".`);
+	ok(`Listing is now "${indexText(result.listing.status)}".`);
 	reportRetraction(result.cardRetractionRequested);
 	json(result);
 }
@@ -584,9 +611,12 @@ export async function listingSetPolicyCommand(
 		throw toCliError(error, "updateListing", creds.baseUrl);
 	}
 	ok("Auto-allow policy updated.");
-	kv("autoAllowContact", String(result.autoAllowContact));
-	kv("capabilities", (result.autoAllowCapabilities ?? []).join(", ") || "—");
-	kv("dailyCap", result.autoAllowDailyCap ?? null);
+	kv("autoAllowContact", indexText(result.autoAllowContact));
+	kv(
+		"capabilities",
+		neutralizeControls((result.autoAllowCapabilities ?? []).join(", ")) || "—",
+	);
+	kv("dailyCap", indexText(result.autoAllowDailyCap));
 	if (
 		result.autoAllowContact &&
 		(result.autoAllowCapabilities ?? []).length === 0
@@ -613,10 +643,10 @@ function reportRetraction(requested: boolean | undefined): void {
 
 export function renderListingRows(listings: PublicListing[]): string[][] {
 	return listings.map((l) => [
-		l.displayName,
-		shortNpub(l.npub),
+		indexText(l.displayName),
+		indexText(shortNpub(l.npub)),
 		renderHandle(l),
 		l.verified ? "yes" : "—",
-		l.capabilities.join(","),
+		neutralizeControls(l.capabilities.join(",")),
 	]);
 }

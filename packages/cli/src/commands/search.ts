@@ -1,7 +1,7 @@
 import { createApiClient, toCliError } from "../lib/api.js";
 import { resolveApiCredentials, resolveProfileName } from "../lib/config.js";
 import { heading, info, json, say, table } from "../lib/output.js";
-import { renderListingRows } from "./listing.js";
+import { indexText, renderListingRows } from "./listing.js";
 
 export interface SearchOptions {
 	profile?: string;
@@ -46,7 +46,7 @@ export async function searchCommand(
 	}
 
 	heading(
-		`${result.total} result${result.total === 1 ? "" : "s"} — searching as "${creds.orgSlug}"`,
+		`${indexText(result.total)} result${result.total === 1 ? "" : "s"} — searching as "${indexText(creds.orgSlug)}"`,
 	);
 	table(renderListingRows(result.listings), [
 		"NAME",
