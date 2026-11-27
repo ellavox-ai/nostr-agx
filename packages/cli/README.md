@@ -248,10 +248,18 @@ Each run uses a fresh ephemeral tsnet state dir so a one-off key's tags are
 applied. Use `--state-dir <path>` to keep state across runs.
 
 Routing is all-or-nothing for the profile's transport: with Tailscale enabled,
-its relays and peer-advertised NIP-65 relays are dialed through tsnet. Public
-relays/peers are not guaranteed to be reachable that way, so keep them in a
-profile without Tailscale unless you intentionally route public traffic through
-an exit node. See [docs/tailscale.md](../../integrations/tailscale/docs/tailscale.md).
+its relays and peer-advertised NIP-65 relays are all handed to the local tsnet
+proxy. Addresses of nodes on your tailnet then travel over the tailnet, and so
+does an address inside a subnet route that another tailnet node advertises, when
+this node accepts subnet routes (tsnet v1.104.7 turns that on by default on
+Windows, not on Linux or macOS; the launcher cannot change it). Any other
+address (a public relay, a peer's relay, `127.0.0.1`, your local network) is
+dialed from this machine's own network connection and not through the tailnet,
+so public relays stay reachable but the tailnet does not hide this machine's IP
+address from them. There is no exit-node option. By default the bundled node
+also uploads Tailscale client logs to `log.tailscale.com`; see
+[Routing scope](../../integrations/tailscale/docs/tailscale.md#routing-scope) and
+[Tailscale log upload](../../integrations/tailscale/docs/tailscale.md#tailscale-log-upload).
 
 See [docs/tailscale.md](../../integrations/tailscale/docs/tailscale.md) for prerequisites, ACL example,
 the full command reference, and troubleshooting. For applications that create
@@ -343,7 +351,7 @@ discoverable, advertise from a `serve` that actually serves something.
 
 Whatever the flags, a message body cannot pose as a header line: every line of
 it is indented (a break is any of `\n`, `\r`, `\v`, `\f`, U+0085, U+2028,
-U+2029), and control characters, ANSI escapes included, print as U+FFFD (`�`).
+U+2029), and control characters, ANSI escapes included, print as U+FFFD, the Unicode replacement character.
 The peer-supplied ids on header lines (`contextId`, a task's `taskId`, a
 receipt's `refEventId`) get the same treatment, and a task payload prints as
 one-line JSON.

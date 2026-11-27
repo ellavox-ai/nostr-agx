@@ -1,10 +1,10 @@
 # @nostr-agx/tailscale
 
 Opt-in Tailscale routing for `@nostr-agx/nostr`. It starts a local tsnet node with a launcher
-that is **bundled in this package** (Go source in `launcher/`, prebuilt binaries in `bin/`), then
-gives `NostrTransport` the authenticated loopback SOCKS5 proxy it needs to dial a relay that is
-already reachable on your tailnet. No separate launcher package or optional platform dependencies
-are required.
+that is **bundled in this package** (Go source in `launcher/`; the published package also carries
+the prebuilt binaries in `bin/`, which a git checkout does not), then gives `NostrTransport` the
+authenticated loopback SOCKS5 proxy it needs to dial a relay that is already reachable on your
+tailnet. No separate launcher package or optional platform dependencies are required.
 
 AGX stays on Nostr — Tailscale only supplies the network path. `@nostr-agx/nostr` has no Tailscale
 dependency; its `relayProxy` hook and the optional `socks-proxy-agent` peer are opt-in. Nothing
@@ -12,9 +12,8 @@ changes for hosts that do not use them.
 
 This is the **SDK integration** for applications that build their own transport.
 
-It requires a version of `@nostr-agx/nostr` that exposes the `relayProxy`
-transport option. Until that option is published, install a local build or a
-prerelease of `@nostr-agx/nostr` when developing this package.
+It requires `@nostr-agx/nostr` 0.7.0 or later, the first release that exposes the `relayProxy`
+transport option.
 
 ## Install
 
@@ -28,8 +27,13 @@ transport alone does not pull in the bundled binaries. Install both packages, pl
 
 The native launcher for the host platform ships inside the package under `bin/<platform>/`. Set
 `AGX_TAILSCALE_BINARY` to use your own build instead; `startBundledTailscale()` and
-`bundledBinaryPath()` are exported for direct use. The binaries are cross-compiled from
-`launcher/` with `pnpm build:launcher` (requires Go 1.27+).
+`bundledBinaryPath()` are exported for direct use. The binaries are not checked in: the release
+workflow ([`publish.yml`](../../.github/workflows/publish.yml)) builds them for each published version, and in a git
+checkout you cross-compile them from `launcher/` with `pnpm build:launcher` (requires Go 1.27.4 or
+later, the version in `launcher/go.mod`).
+
+The binaries link the Go standard library and other Go modules under their own licences;
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists them and reproduces each text. It is not a legal review.
 
 ## Use
 
@@ -175,11 +179,18 @@ A borrowed URL can be reused after `transport.stop()`; an owned handle cannot.
 ## Constraints
 
 **Routing scope.** The proxy is all-or-nothing for a transport: every relay
-WebSocket it owns (operator relays and peer-advertised NIP-65 relays) is dialed
-through tsnet. Public relays are outside the tailnet, so unless you configure
-the tsnet node's exit node, they will not be reachable over that path. Use this
-integration for a tailnet-only transport, or split public and tailnet relays
-across separate transports/profiles.
+WebSocket it owns (operator relays and peer-advertised NIP-65 relays) is handed
+to the local tsnet proxy. Addresses of nodes on your tailnet then travel over
+the tailnet, and so does an address inside a subnet route that another tailnet
+node advertises, when this node accepts subnet routes (tsnet v1.104.7 turns that
+on by default on Windows, not on Linux or macOS; the launcher cannot change it).
+Any other address (a public relay, a peer-advertised relay, `127.0.0.1`, a
+local-network address) is dialed from this machine's own network connection and
+not through the tailnet, so public relays stay reachable but the tailnet does
+not hide this machine's IP address from them, and the proxy does not limit where
+it dials. The launcher has no exit-node option. Use this integration for relays
+that live on your tailnet; [Routing scope](docs/tailscale.md#routing-scope) has
+the table, what was not checked, and the tsnet source it is based on.
 
 Proxy routing needs an explicit WebSocket implementation (`ws` in Node), because the global WHATWG
 WebSocket has no socket/agent options. Operator-configured relay hostnames are resolved by the proxy
@@ -192,3 +203,8 @@ the parent process in the proxy URL; do not log that URL.
 **No global WebSocket mutation.** The transport injects a WebSocket implementation per relay dial, so
 host code that dials `nostr-tools` directly is unaffected. Use separate transports (and separate
 Tailscale state directories) for separate tailnet nodes.
+
+**Tailscale logs.** By default the bundled tsnet node uploads Tailscale client
+logs to `log.tailscale.com`, and `TS_NO_LOGS_NO_SUPPORT` set in your shell does
+not reach the launcher. See [Tailscale log upload](docs/tailscale.md#tailscale-log-upload)
+for what that means and the wrapper that turns it off today.
