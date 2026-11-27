@@ -19,14 +19,14 @@ import { loadIdentity } from "../identity.js";
 import { createCollector } from "../inbox.js";
 import { acquireLock } from "../lock.js";
 import { profileDir } from "../paths.js";
-import { isPastedSecretKey, toHexPubkey } from "../peer.js";
+import { toHexPubkey } from "../peer.js";
 import { FileSeenStore, loadState, updateState } from "../state.js";
 import { MessageStore } from "../store/message-store.js";
 import { createTransport } from "../transport.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import { DeliveryQueue, deliver } from "./delivery.js";
 import { messageEvent, receiptEvent, taskEvent } from "./events.js";
-import { ApiError, readJson, sendError, sendJson } from "./http.js";
+import { ApiError, readJson, sendError, sendJson, shown } from "./http.js";
 import { MAX_BACKGROUND_TASKS_IN_FLIGHT, parseIdempotencyKey, TaskOperationStore } from "./idempotency.js";
 import { verifyGatewayKey } from "./keys.js";
 import { type OperationDeps, parseTaskRequest, readCard, runRecoveredTaskRequest, runTaskRequest, sendMessage } from "./operations.js";
@@ -124,11 +124,6 @@ const SHUTDOWN_WAIT_MS = 8_000;
 
 function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
-}
-
-/** A request path or id as it may be quoted in an answer or a log line: never a pasted secret key. */
-function shown(value: string): string {
-	return isPastedSecretKey(value) ? "(a value with a secret key, not shown)" : value;
 }
 
 function bearer(req: IncomingMessage): string {

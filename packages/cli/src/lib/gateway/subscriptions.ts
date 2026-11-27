@@ -5,7 +5,7 @@ import { isIP } from "node:net";
 import { normalizePubkey } from "@nostr-agx/nostr";
 import { z } from "zod";
 import { gatewaySubscriptionsPath, writePrivateJson } from "../paths.js";
-import { isPastedSecretKey } from "../peer.js";
+import { mayHoldSecretKey } from "./http.js";
 
 /**
  * Webhook subscriptions: where `agx gateway` delivers what arrives for this
@@ -201,6 +201,17 @@ export function parseSubscriptionInput(
 		);
 	}
 	const input = parsed.data;
+	// Kept in the subscriptions file, shown back and logged: a key has no place in either.
+	if (mayHoldSecretKey(input.url)) {
+		throw new SubscriptionError(
+			"Invalid subscription: url holds a secret key (nsec1…), which is not shown here",
+		);
+	}
+	if (mayHoldSecretKey(input.label ?? "")) {
+		throw new SubscriptionError(
+			"Invalid subscription: label holds a secret key (nsec1…), which is not shown here",
+		);
+	}
 	let url: URL;
 	try {
 		url = new URL(input.url);
@@ -217,6 +228,12 @@ export function parseSubscriptionInput(
 		: [];
 	if (serveTasks && capabilities.length === 0) {
 		throw new SubscriptionError("Name the capabilities this webhook serves, such as invoice.review");
+	}
+	// A capability goes onto the Agent Card, which anyone can read.
+	if (capabilities.some(mayHoldSecretKey)) {
+		throw new SubscriptionError(
+			"A capability must be a name such as invoice.review, not a secret key (nsec1…), which is not shown here",
+		);
 	}
 	// The client runs a handler for exactly the capability it was registered
 	// under, so `invoice.*` would be advertised and never served.
@@ -240,7 +257,7 @@ export function parseSubscriptionInput(
 		if (hex) {
 			allowedPeers.push(hex);
 		} else if (entry.trim()) {
-			invalid.push(isPastedSecretKey(entry) ? "(a secret key, not shown)" : entry.trim());
+			invalid.push(mayHoldSecretKey(entry) ? "(a secret key, not shown)" : entry.trim());
 		}
 	}
 	if (invalid.length > 0) {
