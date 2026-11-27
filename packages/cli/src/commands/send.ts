@@ -4,7 +4,7 @@ import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
 import { fail, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
-import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { refuseOwnSecretKey, toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { MessageStore } from "../lib/store/message-store.js";
 import { createTransport, makeLogger } from "../lib/transport.js";
 
@@ -30,6 +30,7 @@ export async function sendCommand(
 	const profileName = resolveProfileName(options.profile);
 	const profile = effectiveProfile(profileName);
 	const identity = loadIdentity(profileName);
+	refuseOwnSecretKey(peer, profileName, "recipient");
 	const to = toHexPubkey(peer, "recipient");
 	const transport = await createTransport(
 		profile,
@@ -171,6 +172,7 @@ export async function requestCommand(
 	const profileName = resolveProfileName(options.profile);
 	const profile = effectiveProfile(profileName);
 	const identity = loadIdentity(profileName);
+	refuseOwnSecretKey(peer, profileName, "recipient");
 	const to = toHexPubkey(peer, "recipient");
 	const timeoutMs = Number(options.timeout ?? 30_000);
 

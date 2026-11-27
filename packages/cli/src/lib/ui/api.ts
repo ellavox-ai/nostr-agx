@@ -225,6 +225,12 @@ export async function handleApi(
 		if (!NPUB_RE.test(npub)) {
 			return fail(400, "bad_npub", "Not a valid npub.");
 		}
+		// NPUB_RE only checks the letters; this is the strict check (an npub must carry 32 bytes).
+		try {
+			deps.toNpub(npub);
+		} catch {
+			return fail(400, "bad_npub", "Not a valid npub.");
+		}
 		store.removePeer(npub);
 		return { status: 200, body: { ok: true } };
 	}

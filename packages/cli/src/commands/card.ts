@@ -10,7 +10,7 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { heading, info, json, kv, say, warn } from "../lib/output.js";
-import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { refuseOwnSecretKey, toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 
 /**
  * Read an agent's published Agent Card (kind 11337) and relay list (kind 10002)
@@ -125,6 +125,7 @@ export async function cardCommand(
 				"agx config set relays ws://127.0.0.1:7447\n  and run one with:  agx relay",
 		});
 	}
+	refuseOwnSecretKey(peer, profileName, "agent identity");
 	const pubkey = toHexPubkey(peer, "agent identity");
 
 	const [cardEvents, relayEvents] = await Promise.all([

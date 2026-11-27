@@ -3,7 +3,7 @@ import { effectiveProfile, getProfile, resolveProfileName, updateProfile } from 
 import { tryAcquireLock } from "../lib/lock.js";
 import { info, json, ok, say, shortNpub, table } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
-import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { refuseOwnSecretKey, toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { MessageStore } from "../lib/store/message-store.js";
 import { HELD_SCHEMA } from "../lib/threads.js";
 
@@ -41,6 +41,7 @@ export type HeldDecision = "allow" | "ignore" | "block";
 export function heldDecideCommand(decision: HeldDecision, peer: string, options: HeldOptions): void {
 	const profileName = resolveProfileName(options.profile);
 	effectiveProfile(profileName);
+	refuseOwnSecretKey(peer, profileName, "sender");
 	const hex = toHexPubkey(peer, "sender");
 	const npub = toDisplayNpub(hex);
 	const dir = profileDir(profileName);

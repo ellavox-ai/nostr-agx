@@ -12,7 +12,7 @@ import { neutralizeControls } from "../lib/inbound-lines.js";
 import { acquireLock } from "../lib/lock.js";
 import { info, json, kv, ok, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
-import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { toDisplayNpub, toHexPubkey, uiToNpub } from "../lib/peer.js";
 import { MessageStore } from "../lib/store/message-store.js";
 import type { AgentLookup, ApiDeps } from "../lib/ui/api.js";
 import { createAgxStore } from "../lib/ui/agx-store.js";
@@ -155,7 +155,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 			draftsDir,
 			composeDraft,
 			composeFile: composeDraft && options.compose ? resolve(options.compose) : null,
-			toNpub: (input) => toDisplayNpub(toHexPubkey(input.trim(), "recipient")),
+			toNpub: uiToNpub,
 			identity: () => ({
 				profile: profileName,
 				npub: identity.npub,

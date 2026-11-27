@@ -18,7 +18,7 @@ import {
 } from "../lib/identity.js";
 import { heading, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { identityPath } from "../lib/paths.js";
-import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
+import { isOwnSecretKey, refuseOwnSecretKey, toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { signNonceEvent } from "../lib/proof.js";
 import { readStdin } from "../lib/stdin.js";
 
@@ -173,6 +173,7 @@ export function identityAllowCommand(
 	const profile = getProfile(profileName);
 	const next = new Set(profile.allow);
 	for (const peer of peers) {
+		refuseOwnSecretKey(peer, profileName);
 		next.add(toHexPubkey(peer, "peer"));
 	}
 	updateProfile(profileName, { allow: [...next] });
@@ -190,12 +191,24 @@ export function identityDenyCommand(
 ): void {
 	const profileName = resolveProfileName(options.profile);
 	const profile = getProfile(profileName);
-	const remove = new Set(peers.map((p) => toHexPubkey(p, "peer")));
+	// An entry stored by an older agx for an npub of the wrong length is not a valid peer any more, so it
+	// is taken out by exact match, as `identity allow --list` shows it. Anything else must be a valid peer.
+	const remove = new Set(
+		peers.map((p) => {
+			const listed = p.trim().toLowerCase();
+			return profile.allow.includes(listed) ? listed : toHexPubkey(p, "peer");
+		}),
+	);
 	updateProfile(profileName, {
 		allow: profile.allow.filter((hex) => !remove.has(hex)),
 	});
 	for (const peer of peers) {
-		ok(`Removed ${toDisplayNpub(peer)} from the allowlist.`);
+		// This profile's own secret key is taken off the list like any entry, but an npub of it would show it.
+		ok(
+			isOwnSecretKey(peer, profileName)
+				? "This profile's own secret key is off the allowlist (not shown here)."
+				: `Removed ${toDisplayNpub(peer)} from the allowlist.`,
+		);
 	}
 }
 
