@@ -4,7 +4,10 @@ import WebSocket, { type ClientOptions } from "ws";
 import type { Profile } from "./config.js";
 import { configError } from "./errors.js";
 import type { Identity } from "./identity.js";
-import { tailscaleRelayProxyForProfile } from "./tailscale/index.js";
+import {
+	type TailscaleUseOptions,
+	tailscaleRelayProxyForProfile,
+} from "./tailscale/index.js";
 
 /** How long a relay may take to accept the WebSocket upgrade. */
 export const HANDSHAKE_TIMEOUT_MS = 7_000;
@@ -47,6 +50,8 @@ export interface TransportOptions {
 	/** Per-run Tailscale opt-in/out flags (`--tailscale`, `--without-tailscale`). */
 	tailscale?: boolean;
 	withoutTailscale?: boolean;
+	/** Called if the Tailscale launcher ends on its own while the transport lives. */
+	onTailscaleExit?: TailscaleUseOptions["onTailscaleExit"];
 }
 
 export function createTransport(

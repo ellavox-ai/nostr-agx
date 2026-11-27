@@ -7,7 +7,7 @@ import {
 	type TailscaleAuthKeyInput,
 } from "./auth-key";
 import { TailscaleError } from "./errors";
-import { startBundledTailscale } from "./launcher";
+import { startBundledTailscale, type BundledTailscaleExit } from "./launcher";
 
 export {
 	DEFAULT_TAILSCALE_AUTH_KEY_ENV,
@@ -27,6 +27,7 @@ export { TailscaleError, type TailscaleErrorCode } from "./errors";
 export {
 	bundledBinaryPath,
 	startBundledTailscale,
+	type BundledTailscaleExit,
 	type BundledTailscaleProxy,
 	type StartBundledTailscaleOptions,
 } from "./launcher";
@@ -37,12 +38,24 @@ export interface TailscaleStartOptions {
 	authKey?: string;
 	/** Tailscale hostname. Defaults to `nostr-agx`. */
 	hostname?: string;
-	/** Persistent tsnet state directory. Defaults to `~/.nostr-agx/tailscale`. */
+	/**
+	 * Persistent tsnet state directory. A node enrolled in it is reused, and the
+	 * directory is kept when the node stops. When omitted, the node gets a private
+	 * temporary directory of its own, deleted when it stops.
+	 */
 	stateDir?: string;
 	/** Alternative coordination server URL. */
 	controlUrl?: string;
 	/** Register an ephemeral node. */
 	ephemeral?: boolean;
+	/**
+	 * Do not let Tailscale upload this node's client logs to `log.tailscale.com`,
+	 * which tsnet does by default. Tailscale's documentation says this also opts the
+	 * device out of support that would need those logs. Defaults to false, so the
+	 * launcher's default applies unless `TS_NO_LOGS_NO_SUPPORT` is set in this
+	 * process.
+	 */
+	disableLogUpload?: boolean;
 	/** ACL tags such as `tag:agx-agent`. */
 	tags?: string[];
 	/** SOCKS5 listen address. Must be loopback. Defaults to `127.0.0.1:0`. */
@@ -63,6 +76,27 @@ export interface TailscaleProxy {
 	readonly port?: number;
 	/** Stop the child process. Idempotent. */
 	stop(): Promise<void>;
+	/**
+	 * Call `listener` if the launcher ends on its own; returns a function that
+	 * removes it. Optional, so a custom {@link TailscaleStarter} need not offer it.
+	 */
+	onExit?(listener: (exit: BundledTailscaleExit) => void): () => void;
+}
+
+/**
+ * What {@link startTailscaleRelayProxy} returns: a relay proxy handle that can
+ * also tell you when the launcher ends without `stop()`. A transport that is
+ * given this handle keeps only `url` and `stop()`, so subscribe before handing
+ * it over.
+ */
+export interface TailscaleRelayProxyHandle extends RelayProxyHandle {
+	/**
+	 * Call `listener` if the launcher ends without `stop()` having been called, for
+	 * example because it crashed. From then on `url` no longer works. Returns a
+	 * function that removes the listener. A launcher that offers no such notice
+	 * (a custom {@link TailscaleStarter}) never calls it.
+	 */
+	onExit(listener: (exit: BundledTailscaleExit) => void): () => void;
 }
 
 /** Replace the default launcher, e.g. to inject a fake in tests. */
@@ -112,7 +146,7 @@ export interface TailscaleRelayConfig
  */
 export async function startTailscaleRelayProxy(
 	config: TailscaleRelayConfig = {},
-): Promise<RelayProxyHandle> {
+): Promise<TailscaleRelayProxyHandle> {
 	const starter = config.start ?? startBundledTailscale;
 	const authKey = await resolveTailscaleAuthKey(config.authKey);
 	const options: TailscaleStartOptions = {
@@ -121,6 +155,7 @@ export async function startTailscaleRelayProxy(
 		stateDir: config.stateDir,
 		controlUrl: config.controlUrl,
 		ephemeral: config.ephemeral,
+		disableLogUpload: config.disableLogUpload,
 		tags: config.tags,
 		listen: config.listen,
 		timeoutMs: config.timeoutMs,
@@ -150,6 +185,7 @@ export async function startTailscaleRelayProxy(
 	return {
 		url: proxy.url,
 		stop: () => proxy.stop(),
+		onExit: (listener) => proxy.onExit?.(listener) ?? (() => {}),
 	};
 }
 

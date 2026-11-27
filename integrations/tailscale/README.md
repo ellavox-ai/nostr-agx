@@ -140,13 +140,130 @@ is never logged.
 
 ## Other entry points
 
-- `startTailscaleRelayProxy(config)` starts the bundled node immediately and returns a bare
-  `{ url, stop() }` handle. Use it when you need the proxy lifecycle in your own code.
+- `startTailscaleRelayProxy(config)` starts the bundled node immediately and returns a
+  `{ url, stop(), onExit() }` handle. Use it when you need the proxy lifecycle in your own code.
 - `startBundledTailscale(options)` is the underlying launcher, and `bundledBinaryPath()` reports the
   binary selected for the current platform.
 - `TailscaleError` carries a `code` (`configuration | auth | network | module`) and a `remediation`
   string, so a host can branch on the failure without parsing messages.
 - `start` in the config replaces the launcher, which is useful in tests or with a custom binary.
+
+### State directory, exit notice, environment and logs
+
+- **Exit notice.** The handle from `startTailscaleRelayProxy()` and `startBundledTailscale()` has
+  `onExit(listener)`. The listener gets `{ code, signal }` if the launcher ends without `stop()`
+  having been called (it crashed, or was killed from outside); after that the proxy URL no longer
+  works. It returns a function that removes the listener. A transport that is given the handle keeps
+  only `url` and `stop()`, so subscribe before handing it over. A listener that throws does not end
+  your process and does not stop the listeners after it: the error is printed as a process warning
+  (code `AGX_TAILSCALE_ONEXIT_LISTENER`) and, on the handle from `startBundledTailscale()`, kept in
+  `listenerErrors`. Each listener is called once.
+- **State directory.** Without `stateDir`, each node gets its own private temporary directory
+  (`agx-tailscale-XXXXXX` in your operating system's temporary folder, mode 0700, POSIX).
+  It holds the node's private keys, so it is deleted as soon as the launcher stops. Pass `stateDir`
+  to keep a node's identity between runs; a directory you pass is never deleted. tsnet ignores a
+  new auth key once its state already holds a node, so a key's tags are applied only the first time
+  a directory is used.
+  - *Removed:* when `stop()` is awaited (or the launcher ends on its own), and, as a last resort,
+    when the whole process ends through `process.exit()`, an uncaught exception or an unhandled
+    promise rejection (checked by tests with a stand-in launcher). The last-resort removal is
+    synchronous and best effort.
+  - *Left behind:* when the process is ended by `SIGKILL`, or by a signal it has no handler for
+    (`SIGINT`, `SIGTERM` and `SIGHUP` do that by default), because Node does not run the exit hook
+    then. The same holds when V8 runs out of memory and when the process calls `process.abort()`
+    (not run here; from Node's documentation of the `exit` event). Look in the temporary folder for
+    `agx-tailscale-*` and delete what no running process uses.
+  - This library installs no signal handlers, because that is the host's choice. A host that wants
+    the directory removed on `Ctrl-C` handles the signal and awaits `stop()`.
+  - The `agx` command line keeps its Tailscale state in its own per-run folder under `AGX_HOME`
+    (`tailscale-runs/node-XXXXXX`) and removes it when the node stops, and also, as a last
+    resort, when the process ends through `process.exit()`, an uncaught exception or an unhandled
+    rejection. That includes a second `Ctrl-C` while `agx serve` is still stopping. A folder you
+    name with `--state-dir` or in the profile is never removed. The `agx` folder is left behind in
+    these cases, because Node does not run the exit hook for them: `SIGKILL`; `SIGHUP`
+    (`agx serve` handles `SIGINT` and `SIGTERM` only; `SIGHUP` was sent to `agx serve` and to its
+    process group, and the folder was left); V8 running out of memory; `process.abort()` (the last
+    two from Node's documentation, not run); and a `Ctrl-C` or `SIGTERM` that reaches `agx serve`
+    while it is still starting, before it prints "watching for messages", because it installs its
+    two signal handlers only once the start is done (tried with a stand-in launcher that was
+    slow to report its address; `main` has the same order, so this is not new). With
+    the real launcher that window is the time it takes to join the tailnet. Delete `tailscale-runs/node-*`
+    folders under `AGX_HOME` that no running `agx` uses.
+  - A `Ctrl-C` in a terminal reaches `agx serve` and the launcher it started together. If serve
+    sees the launcher end first, it starts to stop and prints the launcher notice; the signal that
+    reaches it a moment later is taken as that same `Ctrl-C`, so serve finishes the stop and exits
+    with status 5. A second signal ends it at once with status 130. If serve gets the signal first,
+    the launcher's end is not reported and serve exits 0.
+  - Windows has not been tried.
+- **Environment.** The launcher gets `HOME` and the auth key, plus these when they are set and not
+  empty: `USERPROFILE`, `SystemRoot`, `TMPDIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (upper and
+  lower case) and `TS_NO_LOGS_NO_SUPPORT`. Nothing else from your environment reaches it, including
+  `TS_AUTHKEY`, `TS_AUTH_KEY` and `AGX_TAILSCALE_AUTH_KEY`. The key comes only from the `authKey`
+  option: `startTailscaleRelayProxy()` reads `TS_AUTHKEY` and `AGX_TAILSCALE_AUTH_KEY` for you when
+  `authKey` is omitted, `startBundledTailscale()` does not. Windows has not been tried.
+  - *Proxy logins.* A `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy` or `https_proxy` value that has an
+    `@` in it (`user:password@host`, with or without a scheme, valid address or not) is not passed
+    on. One line on stderr names the variable and never its value. `NO_PROXY` and `no_proxy` are
+    always passed on, and so is a proxy address without a login. Use a proxy address without a
+    login for the launcher. Why: the Tailscale code inside the launcher logs the proxy it uses
+    (`net/tshttpproxy/tshttpproxy.go` line 162, with the address from line 155), and, for every
+    request through a proxy, the first 20 characters of the `Proxy-Authorization` header, which are
+    `Basic ` and the start of the base64 of `user:password` (lines 226-234). That is the first 10
+    bytes of `user:password`: a login of up to 10 bytes is in it in full, a longer one shows its
+    first 10 bytes. Read in the source of v1.104.7 with `gh api` on 2026-11-27, and
+    the format strings are also in the bundled macOS arm64 binary (read with `strings`, never run).
+    Go's own error for a proxy address it cannot read, `invalid proxy address %q`
+    (`golang.org/x/net/http/httpproxy`, `proxy.go` line 163 at v0.60.0, the version in
+    `launcher/go.mod`), prints the raw value, login included; the skip above is what keeps a login
+    out of it. Read in the source with `gh api` on 2026-11-27, not run. The proxy variables are the
+    only proxy setting this package controls. On Synology Linux the Tailscale code also builds a proxy
+    address, with a login, from `/etc/proxy.conf` (`proxy_user`, `proxy_pwd`:
+    `net/tshttpproxy/tshttpproxy_synology.go` lines 102-105, wired in by `tshttpproxy_linux.go`
+    lines 21-23, v1.104.7; read with `gh api` on 2026-11-27, not run). Such a login
+    does not come from your environment, so it is not skipped; only the masking below covers it,
+    in the two shapes it is printed in. Windows has its own system proxy code that was not read.
+  - *What is done to the launcher's stderr.* This package reads it and writes it to your stderr one
+    whole line at a time, as a second layer. Replaced with `***`: what sits between `://` and `@`
+    in any URL, the `(auth "...")` text of that CONNECT line, a `Proxy-Authorization` header (to the
+    end of its line) and any `Basic` followed by base64 text; a plain word that follows `Basic`
+    is hidden too. Also changed: bytes that are not valid UTF-8 come out as the replacement character
+    U+FFFD, a last line without a newline is written without one (so it runs into the next thing
+    written to stderr), and at most 65,536 characters (64 KiB) of one line are kept: a longer line is
+    written as its first 65,536 characters, masked, followed by ` [line cut]`, and the rest of that line is dropped. The
+    launcher's stdout is not forwarded: it carries only the SOCKS5 address, which this package reads
+    and never prints. The masking cannot cover a login in your own environment, which anything that
+    can read your process's environment still sees. The masking knows the shapes the pinned
+    Tailscale code prints. Three shapes that code never prints still pass it unchanged: a URL
+    written with its slashes escaped for JSON (`http:\/\/user:pass@host`), a bare `user:pass@host`
+    with no `://` before it, and a loose `Basic` value of fewer than 8 base64 characters (a login of
+    about 4 bytes or less; the same login inside `(auth "...")` is masked). That is acceptable
+    because a proxy variable with a login is not passed on at all, and a login the system supplies
+    (the Synology file above) is printed only in the two shapes the masking covers.
+  - *`TS_NO_LOGS_NO_SUPPORT`.* Tailscale reads it as a yes/no value and stops the whole launcher
+    when it cannot read it. So the value is passed on only when it is one of `1`, `t`, `T`, `TRUE`,
+    `true`, `True`, `0`, `f`, `F`, `FALSE`, `false`, `False`. Any other value is left out, with one
+    line on stderr that names the variable and not its value.
+- **Log upload.** tsnet uploads Tailscale client logs to `log.tailscale.com` by default.
+  `disableLogUpload: true` sets `TS_NO_LOGS_NO_SUPPORT=true` for the launcher to turn that off, and
+  it wins over the value in your environment. It is off unless you ask, and the `agx` command line
+  has no flag for it yet. Side effects, as of 2026-11-27:
+  - Tailscale's logging page says the switch "disables telemetry and opts the device out of any
+    support that would require that telemetry for debugging"
+    (<https://tailscale.com/docs/features/logging>, read live 2026-11-27).
+  - The network flow logs page says "When network flow logs are enabled (and not using
+    `--no-logs-no-support`), nodes report their flow information (for both ends of the connection)
+    to the Tailscale logs service", so with the switch the node does not report flows
+    (<https://tailscale.com/docs/features/logging/network-flow-logs>, read live 2026-11-27; the
+    page says it was last validated on Oct 8, 2026).
+  - In the source of the Tailscale release this package pins (v1.104.7), the node also tells the
+    control server that it has opted out (`hostinfo/hostinfo.go` line 67), and if the control
+    server's network map turns network flow logging on for the node, a node with the switch sets
+    itself to not run and reports "tailnet requires logging to be enabled"
+    (`ipn/ipnlocal/local.go` lines 2067-2081). The test there is for the capability
+    `data-plane-audit-logs`, which the same source uses to switch flow logging on for the node
+    (`NetLogIDs`, lines 8251-8259). Neither is stated on the docs pages above. They were read
+    from the source, and not run here, so what the launcher does in that second case has not
+    been tried.
 
 ### Using a proxy that is already running
 

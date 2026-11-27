@@ -824,7 +824,7 @@ default 30m); without `--wait` the command exits 7 with the link.
 | 2 | usage: a bad flag or argument |
 | 3 | local config: not logged in, no organization, a credential bound to another server, a malformed file |
 | 4 | authentication: the key was refused, has expired, or is bound to another organization; a login was denied or expired |
-| 5 | the server (or a relay) could not be reached |
+| 5 | the server (or a relay) could not be reached; `agx serve` also exits 5 when its Tailscale launcher ended on its own and it had to stop, even if a Ctrl-C reaches it just after (see `integrations/tailscale/README.md`) |
 | 6 | the server refused the request on its merits |
 | 7 | **a person has to act in a browser first**; not a failure |
 | 130 | interrupted (Ctrl-C; a waiting `agx login` also stops this way on SIGTERM or SIGHUP, keeping its code) |

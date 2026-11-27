@@ -15,6 +15,8 @@ export type TailscaleErrorCode =
 	) => Error
 		? C
 		: never;
+/** How the launcher ended, as the SDK reports it. */
+export type TailscaleExit = import("@nostr-agx/tailscale").BundledTailscaleExit;
 export type TailscaleOAuthOptions = Parameters<
 	TailscaleSdk["oauthAuthKey"]
 >[0];

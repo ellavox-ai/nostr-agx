@@ -19,7 +19,7 @@ import {
 	oneLineJson,
 	renderInboundLines,
 } from "../lib/inbound-lines.js";
-import { heading, info, kv, say, shortNpub, warn } from "../lib/output.js";
+import { heading, info, kv, notice, say, shortNpub, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import {
@@ -30,6 +30,7 @@ import {
 	unservedTaskNote,
 } from "../lib/serve-tasks.js";
 import { FileSeenStore, loadState, updateState } from "../lib/state.js";
+import { describeTailscaleExit, type TailscaleExit } from "../lib/tailscale/index.js";
 import { MessageStore } from "../lib/store/message-store.js";
 import { createTransport, makeLogger } from "../lib/transport.js";
 
@@ -202,10 +203,20 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	}
 	refreshAllowed();
 
+	// A launcher that ends on its own leaves serve with no way to reach its
+	// relays, so serve stops with an error instead of idling. The notice can
+	// arrive before the shutdown path below exists; `onLauncherExit` is set once
+	// it does.
+	let launcherExit: TailscaleExit | undefined;
+	let onLauncherExit: (() => void) | undefined;
 	const transport = await createTransport(profile, identity, logger, {
 		profileName,
 		tailscale: options.tailscale,
 		withoutTailscale: options.withoutTailscale,
+		onTailscaleExit: (exit) => {
+			launcherExit = exit;
+			onLauncherExit?.();
+		},
 	});
 	// Keeps what arrives, held senders' text included. Output below is unchanged.
 	const store = new MessageStore(profileDir(profileName), undefined, { claimSpool: true });
@@ -534,8 +545,20 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 		});
 	}
 
-	async function shutdown(): Promise<void> {
+	// Set when the launcher's end started the stop. A Ctrl-C in a terminal reaches
+	// serve and the launcher together, so one signal is expected to follow.
+	let stoppingBecauseLauncherEnded = false;
+	let signalExpectedAfterLauncherEnd = false;
+
+	async function shutdown(exitCode: number = EXIT.ok): Promise<void> {
 		if (draining) {
+			if (stoppingBecauseLauncherEnded && !signalExpectedAfterLauncherEnd) {
+				// That signal is the same Ctrl-C that ended the launcher: the stop is
+				// already under way, and it is not a request to quit without finishing it.
+				// A second signal still ends the process at once.
+				signalExpectedAfterLauncherEnd = true;
+				return;
+			}
 			process.exit(EXIT.interrupted);
 		}
 		draining = true;
@@ -546,7 +569,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 		const timer = setTimeout(() => {
 			persist();
 			releaseLock();
-			process.exit(EXIT.interrupted);
+			process.exit(exitCode === EXIT.ok ? EXIT.interrupted : exitCode);
 		}, 10_000);
 		timer.unref();
 		await client.stop().catch(() => undefined);
@@ -566,11 +589,24 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 		say(
 			`received ${stats.received} · replied ${stats.replied} · tasks ${stats.tasks} · denied ${stats.denied} · cursor ${state.cursor}`,
 		);
-		process.exit(EXIT.ok);
+		process.exit(exitCode);
 	}
 
 	process.on("SIGINT", () => void shutdown());
 	process.on("SIGTERM", () => void shutdown());
+	onLauncherExit = () => {
+		if (!launcherExit || draining) {
+			return;
+		}
+		notice(
+			`The Tailscale launcher stopped on its own (${describeTailscaleExit(launcherExit)}), so agx serve can no longer reach its relays. Stopping; start it again to reconnect.`,
+		);
+		stoppingBecauseLauncherEnded = true;
+		void shutdown(EXIT.network);
+	};
+	if (launcherExit) {
+		onLauncherExit();
+	}
 
 	while (running) {
 		try {
