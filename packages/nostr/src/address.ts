@@ -6,7 +6,10 @@ import { nip19 } from "nostr-tools";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 
-/** Normalize an `npub1…` or 64-char hex pubkey to lowercase hex; null if neither. */
+/**
+ * Normalize an `npub1…` or 64-char hex pubkey to lowercase hex; null if neither.
+ * An npub must carry exactly 32 bytes: nostr-tools decodes one of any length.
+ */
 export function normalizePubkey(input: string): string | null {
 	const s = input.trim();
 	if (HEX64.test(s)) {
@@ -15,7 +18,7 @@ export function normalizePubkey(input: string): string | null {
 	if (s.startsWith("npub1")) {
 		try {
 			const decoded = nip19.decode(s);
-			if (decoded.type === "npub" && typeof decoded.data === "string") {
+			if (decoded.type === "npub" && typeof decoded.data === "string" && HEX64.test(decoded.data)) {
 				return decoded.data;
 			}
 		} catch {

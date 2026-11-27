@@ -37,3 +37,8 @@ export function toDisplayNpub(hexOrNpub: string): string {
 	const hex = normalizePubkey(hexOrNpub);
 	return hex ? toNpub(hex) : hexOrNpub;
 }
+
+/** What the UI's `toNpub` dependency does: any recipient or peer a request names, as a strict npub. Throws when it is not one. */
+export function uiToNpub(input: string): string {
+	return toDisplayNpub(toHexPubkey(input.trim(), "recipient"));
+}

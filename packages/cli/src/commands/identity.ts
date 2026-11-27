@@ -190,7 +190,14 @@ export function identityDenyCommand(
 ): void {
 	const profileName = resolveProfileName(options.profile);
 	const profile = getProfile(profileName);
-	const remove = new Set(peers.map((p) => toHexPubkey(p, "peer")));
+	// An entry stored by an older agx for an npub of the wrong length is not a valid peer any more, so it
+	// is taken out by exact match, as `identity allow --list` shows it. Anything else must be a valid peer.
+	const remove = new Set(
+		peers.map((p) => {
+			const listed = p.trim().toLowerCase();
+			return profile.allow.includes(listed) ? listed : toHexPubkey(p, "peer");
+		}),
+	);
 	updateProfile(profileName, {
 		allow: profile.allow.filter((hex) => !remove.has(hex)),
 	});
