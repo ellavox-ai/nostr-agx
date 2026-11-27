@@ -45,6 +45,7 @@ import {
 	type UnwrappedRumor,
 	unwrapRumor,
 } from "./giftwrap";
+import { redactProxyUrl } from "./proxy-url";
 import {
 	listenEvents,
 	pollInbox,
@@ -175,8 +176,10 @@ export class NostrTransport implements AgxTransport {
 	 * writes it and the lookup reads it at dial time, so the constructor must
 	 * keep the map itself, never copy it. */
 	private readonly peerDnsPins: Map<string, string[]>;
-	/** The proxy this transport dials through, when one is configured. */
-	private relayProxy?: RelayProxyHandle;
+	/** The proxy this transport dials through, when one is configured. A `#`
+	 * field, so `util.inspect` and `JSON.stringify` of the transport do not show
+	 * its address, which may carry a user name and password. */
+	#relayProxy?: RelayProxyHandle;
 	/** Set once `stop()` has released the proxy, so a restart fails clearly. */
 	private proxyReleased = false;
 	private onMessageHandlers = new Set<(msg: AgxIncomingMessage) => void | Promise<void>>();
@@ -247,12 +250,15 @@ export class NostrTransport implements AgxTransport {
 		// Shared, not copied: the pinned lookup closes over this exact map, so
 		// entries `recordPeerPins` adds later have to be visible to it.
 		this.peerDnsPins = peerDnsPins;
-		this.relayProxy = proxy;
+		this.#relayProxy = proxy;
 	}
 
-	/** The SOCKS5 URL in use, if any. Useful for logs and diagnostics. */
+	/** The SOCKS5 URL in use, if any, with any user name and password replaced:
+	 * safe for logs and diagnostics. The credentials stay inside the transport,
+	 * which hands them to the SOCKS client itself. */
 	get relayProxyUrl(): string | undefined {
-		return this.relayProxy?.url;
+		const url = this.#relayProxy?.url;
+		return url === undefined ? undefined : redactProxyUrl(url);
 	}
 
 	/** The WebSocket implementation this transport dials through — the
@@ -260,7 +266,12 @@ export class NostrTransport implements AgxTransport {
 	 * discovery calls outside the transport (the gateway's agent-card lookups)
 	 * must pass this, not the bare class they injected: a raw `ws` subclass
 	 * receives no SOCKS agent, so with Tailscale on those lookups dial the
-	 * relay directly and fail on names only the proxy's DNS can resolve. */
+	 * relay directly and fail on names only the proxy's DNS can resolve.
+	 *
+	 * Do not log or print a socket made with this class, or its agent: the SOCKS
+	 * agent (from `socks-proxy-agent`) keeps the proxy address with its user name
+	 * and password, and shows it, for example in `console.log`, while the socket
+	 * connects. The transport itself does not show them. */
 	get webSocket(): WebSocketImpl | undefined {
 		return this.ws;
 	}
@@ -1069,12 +1080,12 @@ export class NostrTransport implements AgxTransport {
 		// it is closed. A borrowed URL points at a proxy someone else owns, so it
 		// is left running and this transport can start again; an owned handle is
 		// stopped, which makes this transport single-use.
-		const proxy = this.relayProxy;
+		const proxy = this.#relayProxy;
 		let stopError: unknown;
 		if (proxy) {
 			const borrowed = isBorrowedRelayProxy(proxy);
 			if (!borrowed) {
-				this.relayProxy = undefined;
+				this.#relayProxy = undefined;
 				this.proxyReleased = true;
 			}
 			try {

@@ -3,6 +3,7 @@ import {
 	getProfile,
 	resolveProfileName,
 	updateProfile,
+	withEnvOverrides,
 } from "../lib/config.js";
 import { configError, usageError } from "../lib/errors.js";
 import { heading, info, json, kv, notice } from "../lib/output.js";
@@ -167,7 +168,7 @@ export async function tailscaleEnableCommand(
 	const tokenAuth = tokenAuthOf(options.oauthTokenAuth);
 	const authMode: "key" | "oauth" = oauthRequested ? "oauth" : "key";
 
-	const next = updateProfile(profileName, {
+	const change = {
 		tailscale: {
 			...profile.tailscale,
 			enabled: true,
@@ -202,33 +203,45 @@ export async function tailscaleEnableCommand(
 						: profile.tailscale.oauth.tags,
 			},
 		},
-	});
+	};
 
-	if (authKey || oauthSecret) {
-		saveTailscaleSecret(profileName, {
-			...(authKey ? { authKey } : {}),
-			...(oauthSecret ? { oauthClientSecret: oauthSecret } : {}),
-		});
-	}
-
-	const status = tailscaleStatusForProfile(profileName, next);
-	heading("agx tailscale enable");
-	kv("profile", profileName);
-	kv("enabled", "yes (opt-in)");
-	kv("auth", authMode === "oauth" ? "OAuth service" : "Tailscale auth key");
-	kv("hostname", status.hostname);
-	kv("state dir", stateDirDescription(status));
-	kv("transport", "SOCKS5 relay proxy (bundled tsnet)");
-
-	if (options.up === false) {
-		info("Not starting the proxy yet (--no-up). Run `agx tailscale up` to check it.");
-		return;
-	}
-
-	// A short start/stop verifies the credentials and the bundled launcher.
-	// Long-running commands start their own proxy through NostrTransport.
-	const proxy = await startTailscaleForProfile(profileName, effectiveProfile(profileName));
+	// A short start/stop verifies the credentials and the bundled launcher, with
+	// the new settings and the key or secret as they would be stored. Nothing is
+	// saved unless it works. Long-running commands start their own proxy through
+	// NostrTransport.
+	const proxy =
+		options.up === false
+			? undefined
+			: await startTailscaleForProfile(
+					profileName,
+					withEnvOverrides({ ...profile, ...change }),
+					{ authKey, oauthClientSecret: oauthSecret },
+				);
 	try {
+		// The key first: if it cannot be written, the profile is still as it was. A
+		// stored key without the opt-in does nothing.
+		if (authKey || oauthSecret) {
+			saveTailscaleSecret(profileName, {
+				...(authKey ? { authKey } : {}),
+				...(oauthSecret ? { oauthClientSecret: oauthSecret } : {}),
+			});
+		}
+		const next = updateProfile(profileName, change);
+
+		const status = tailscaleStatusForProfile(profileName, next);
+		heading("agx tailscale enable");
+		kv("profile", profileName);
+		kv("enabled", "yes (opt-in)");
+		kv("auth", authMode === "oauth" ? "OAuth service" : "Tailscale auth key");
+		kv("hostname", status.hostname);
+		kv("state dir", stateDirDescription(status));
+		kv("transport", "SOCKS5 relay proxy (bundled tsnet)");
+
+		if (!proxy) {
+			info("Not starting the proxy yet (--no-up). Run `agx tailscale up` to check it.");
+			return;
+		}
+
 		kv("relay proxy", displayTailscaleProxyUrl(proxy.url));
 		info(
 			"Verified and stopped the node. `agx serve` and `agx gateway` start their own proxy when Tailscale is enabled.",
@@ -241,7 +254,7 @@ export async function tailscaleEnableCommand(
 			relayProxy: displayTailscaleProxyUrl(proxy.url),
 		});
 	} finally {
-		await proxy.stop();
+		await proxy?.stop();
 	}
 }
 

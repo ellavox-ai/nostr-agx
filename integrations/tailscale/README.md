@@ -65,13 +65,15 @@ Two runnable examples start one node and run a reviewer and a requester through 
 The two transports borrow the same proxy URL; the example owns the node and stops it once at the
 end. See the [example README](examples/README.md) for the full argument lists and notes.
 
-With an auth key passed as an argument (or from `TS_AUTHKEY`):
+With an auth key piped on stdin (or taken from `TS_AUTHKEY`). The key is not accepted as an
+argument, because arguments show in process listings:
 
 ```sh
 pnpm install && pnpm build   # at the repository root
-pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
-  --auth-key tskey-auth-... \
-  --relay wss://relay.my-tailnet.ts.net
+printf %s "$TS_AUTHKEY" | \
+  pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
+    --auth-key-stdin \
+    --relay wss://relay.my-tailnet.ts.net
 ```
 
 With a key minted through an OAuth client, keeping the secret on stdin:

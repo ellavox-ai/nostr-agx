@@ -15,8 +15,6 @@ export const HANDSHAKE_TIMEOUT_MS = 7_000;
  * stops waiting without closing the socket, so such a relay would hold one
  * more socket on every poll, until a long-running `agx serve` or `agx gateway`
  * ran out of file descriptors.
- *
-
  */
 export function withHandshakeTimeout(timeoutMs: number) {
 	return class extends WebSocket {

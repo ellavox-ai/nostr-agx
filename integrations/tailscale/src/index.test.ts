@@ -107,7 +107,7 @@ describe("tailscaleRelayProxy", () => {
 		});
 
 		expect(start).toHaveBeenCalledOnce();
-		expect(transport.relayProxyUrl).toBe(PROXY_URL);
+		expect(transport.relayProxyUrl).toBe("socks5://redacted@127.0.0.1:45678");
 		expect(stop).not.toHaveBeenCalled();
 
 		await transport.stop();

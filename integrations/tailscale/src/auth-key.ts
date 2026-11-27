@@ -427,9 +427,22 @@ async function requestJson(
 	try {
 		response = await fetchImpl(url, {
 			...init,
+			// Never follow a redirect: the secret and the minted key are only for
+			// the address that was configured (and a redirect can leave https).
+			redirect: "error",
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (error) {
+		if (isRefusedRedirect(error)) {
+			// Say what happened, but not where the redirect pointed: nothing from
+			// the service's answer is repeated.
+			throw new TailscaleError(
+				"network",
+				`${what} to ${new URL(url).origin} was answered with a redirect, which is not followed.`,
+				"Set the OAuth URL to the address the service redirects to (an https address), then retry.",
+				{ cause: error },
+			);
+		}
 		throw new TailscaleError(
 			"network",
 			`${what} could not reach ${new URL(url).origin}.`,
@@ -486,6 +499,18 @@ function assertOAuthUrl(raw: string, label: string): string {
 		);
 	}
 	return raw;
+}
+
+/** Whether `fetch` refused an answer because `redirect: "error"` was set. The
+ * reason is on the error's cause (fetch itself only says "fetch failed"). */
+function isRefusedRedirect(error: unknown): boolean {
+	for (let depth = 0, current: unknown = error; depth < 4 && current instanceof Error; depth += 1) {
+		if (current.message === "unexpected redirect") {
+			return true;
+		}
+		current = current.cause;
+	}
+	return false;
 }
 
 function errorMessage(error: unknown): string {

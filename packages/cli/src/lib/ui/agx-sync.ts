@@ -1,4 +1,6 @@
 import { AgxClient } from "@nostr-agx/core";
+import type { NostrTransport } from "@nostr-agx/nostr";
+import type WebSocket from "ws";
 import type { Identity } from "../identity.js";
 import { createCollector } from "../inbox.js";
 import { probeRelay } from "../relay-probe.js";
@@ -27,15 +29,28 @@ export async function createAgxSync(options: {
 	allowed: ReadonlySet<string>;
 	/** Run before each pull, to refresh `allowed` from the profile. */
 	beforePull?: () => void;
+	/**
+	 * A transport to pull through. The caller owns it and stops it; `close()`
+	 * leaves it running. When omitted, one is made here and stopped on `close()`.
+	 */
+	transport?: NostrTransport;
 	verbose: boolean;
 }): Promise<AgxSync> {
 	const logger = makeLogger(options.verbose);
 	const collector = createCollector({ store: options.store, allowed: options.allowed });
 	const seen = new FileSeenStore(options.profileName);
 	const state = loadState(options.profileName);
-	const transport = await createTransport(options.profile, options.identity, logger, {
-		profileName: options.profileName,
-	});
+	const owned = options.transport === undefined;
+	const transport =
+		options.transport ??
+		(await createTransport(options.profile, options.identity, logger, {
+			profileName: options.profileName,
+		}));
+	const stopOwned = async (): Promise<void> => {
+		if (owned) {
+			await transport.stop().catch(() => undefined);
+		}
+	};
 	const client = new AgxClient({
 		transport,
 		seen,
@@ -58,7 +73,7 @@ export async function createAgxSync(options: {
 	}).catch(async (error: unknown) => {
 		// `liveDispatch: false` means client.stop() would not own the transport:
 		// a failed start must not orphan the Tailscale launcher.
-		await transport.stop().catch(() => undefined);
+		await stopOwned();
 		throw error;
 	});
 	let cursor = state.cursor;
@@ -86,7 +101,11 @@ export async function createAgxSync(options: {
 					pulling = false;
 				}
 			}
-			const reachable = await Promise.all(options.profile.relays.map((url) => probeRelay(url, PROBE_TIMEOUT_MS)));
+			// The transport's own class: with a relay proxy it dials through it, like the pull above.
+			const dial = transport.webSocket as typeof WebSocket | undefined;
+			const reachable = await Promise.all(
+				options.profile.relays.map((url) => probeRelay(url, PROBE_TIMEOUT_MS, dial)),
+			);
 			return {
 				fetched: collector.messages.length + collector.heldNow.size - before,
 				relaysOk: reachable.filter(Boolean).length,
@@ -98,7 +117,7 @@ export async function createAgxSync(options: {
 			// `liveDispatch: false` means client.stop() does NOT own the
 			// transport: only this explicit stop ends the Tailscale launcher and
 			// removes its per-run state directory.
-			await transport.stop().catch(() => undefined);
+			await stopOwned();
 			options.store.flush();
 			seen.flush();
 		},

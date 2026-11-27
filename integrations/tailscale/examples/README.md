@@ -7,7 +7,7 @@ once after both agents finish. The shared agent flow lives in `run-agents.ts`.
 
 | Example | How the key is obtained |
 | --- | --- |
-| `two-agents-auth-key.ts` | An `--auth-key` argument (or `TS_AUTHKEY` / `AGX_TAILSCALE_AUTH_KEY`). |
+| `two-agents-auth-key.ts` | The key piped on stdin with `--auth-key-stdin` (or `TS_AUTHKEY` / `AGX_TAILSCALE_AUTH_KEY`). |
 | `two-agents-oauth.ts` | Minted on demand from an OAuth client-credentials exchange. |
 
 The relay must be a `wss://` (or `ws://`) name reachable from the tailnet. With MagicDNS and HTTPS
@@ -19,22 +19,25 @@ need tailnet DNS.
 From the repository root, after `pnpm install && pnpm build`:
 
 ```sh
-pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
-  --auth-key tskey-auth-... \
-  --relay wss://relay.my-tailnet.ts.net
+printf %s "$TS_AUTHKEY" | \
+  pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
+    --auth-key-stdin \
+    --relay wss://relay.my-tailnet.ts.net
 ```
 
 | Argument | Environment fallback | Meaning |
 | --- | --- | --- |
-| `--auth-key <key>` | `TS_AUTHKEY`, `AGX_TAILSCALE_AUTH_KEY` | Tailscale auth key. Required. Never printed. |
+| `--auth-key-stdin` | `TS_AUTHKEY`, `AGX_TAILSCALE_AUTH_KEY` | Read the Tailscale auth key from stdin; without it the key comes from the environment. One of the two is required. Never printed. |
 | `--relay <url>` | `AGX_RELAY` | Private Nostr relay URL. Required. |
 | `--hostname <name>` | — | Tailnet node name (default `agx-two-agents`). |
 | `--state-dir <path>` | — | Tailscale state dir (default: fresh temporary dir per run). |
 | `--help` | — | Show usage without starting anything. |
 
-An auth key on the command line can be captured in shell history; use the environment fallback on
-shared machines. The key is passed to the launcher through its environment, not argv, and is never
-logged.
+The key is not accepted as an argument (`--auth-key <key>` is refused): an argument can be captured
+in shell history and shows in process listings. Pipe it with `--auth-key-stdin`, or use the
+environment fallback. The key is passed to the launcher through its environment, not argv, and is
+never logged. The proxy address the node opens carries a user name and password made for the run, so
+the example prints it with those replaced (`socks5://redacted@127.0.0.1:<port>`).
 
 ## OAuth example
 

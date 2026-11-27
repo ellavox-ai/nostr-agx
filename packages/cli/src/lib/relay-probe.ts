@@ -1,11 +1,18 @@
 import WebSocket from "ws";
 
-/** Whether a relay accepts a WebSocket connection within `timeoutMs`. */
-export function probeRelay(url: string, timeoutMs: number): Promise<boolean> {
+/**
+ * Whether a relay accepts a WebSocket connection within `timeoutMs`. Pass a
+ * transport's own WebSocket class to probe through the same relay proxy.
+ */
+export function probeRelay(
+	url: string,
+	timeoutMs: number,
+	WebSocketClass: typeof WebSocket = WebSocket,
+): Promise<boolean> {
 	return new Promise((resolve) => {
 		let socket: WebSocket;
 		try {
-			socket = new WebSocket(url);
+			socket = new WebSocketClass(url);
 		} catch {
 			resolve(false);
 			return;

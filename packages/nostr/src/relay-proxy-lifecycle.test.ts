@@ -4,6 +4,8 @@ import { RelayProxyError } from "./relay-proxy";
 import { localSigner } from "./signer";
 
 const PROXY_URL = "socks5://agx:secret@127.0.0.1:45678";
+// What `relayProxyUrl` shows: the same address without the user name and password.
+const SHOWN_URL = "socks5://redacted@127.0.0.1:45678";
 
 class FakeWs {}
 
@@ -21,7 +23,7 @@ describe("relay proxy ownership", () => {
 		const stop = vi.fn(async () => {});
 		const transport = await transportWith(() => ({ url: PROXY_URL, stop }));
 
-		expect(transport.relayProxyUrl).toBe(PROXY_URL);
+		expect(transport.relayProxyUrl).toBe(SHOWN_URL);
 		expect(stop).not.toHaveBeenCalled();
 		await transport.stop();
 		expect(stop).toHaveBeenCalledOnce();
@@ -34,9 +36,9 @@ describe("relay proxy ownership", () => {
 	it("leaves a borrowed URL running and allows a restart", async () => {
 		const transport = await transportWith(PROXY_URL);
 		await transport.stop();
-		expect(transport.relayProxyUrl).toBe(PROXY_URL);
+		expect(transport.relayProxyUrl).toBe(SHOWN_URL);
 		await expect(transport.start()).resolves.toBeUndefined();
-		expect(transport.relayProxyUrl).toBe(PROXY_URL);
+		expect(transport.relayProxyUrl).toBe(SHOWN_URL);
 	});
 
 	it("releases an owned handle when creation fails after resolution", async () => {

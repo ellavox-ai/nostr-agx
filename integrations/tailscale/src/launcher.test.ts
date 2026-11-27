@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
 import { bundledBinaryPath, ensureExecutable, startBundledTailscale } from "./launcher";
 
@@ -147,5 +148,110 @@ describe("startBundledTailscale", () => {
 		await expect(startBundledTailscale({ authKey: "" })).rejects.toThrow(
 			/authKey must not be empty/,
 		);
+	});
+});
+
+/** Throwaway SOCKS5 credentials, made fresh for every run. */
+const RUN = Math.random().toString(16).slice(2, 10);
+const USER = `user${RUN}`;
+const PASS = `pass${Math.random().toString(16).slice(2, 10)}`;
+
+/** Everything a person could see if the error were printed or logged. */
+function shown(error: unknown): string {
+	return `${error instanceof Error ? error.message : String(error)}\n${inspect(error, { depth: 4 })}`;
+}
+
+describe("startBundledTailscale: an address it refuses", () => {
+	it.skipIf(!posix)("does not put the proxy credentials in the error for a bad port", async () => {
+		// Port 0 is not a usable proxy port, so the address is refused.
+		const fake = await fakeBinary(
+			`#!/bin/sh\necho socks5://${USER}:${PASS}@127.0.0.1:0\nexec cat >/dev/null\n`,
+		);
+		try {
+			const error = await startBundledTailscale({ binary: fake.path, timeoutMs: 5_000 }).catch(
+				(e: unknown) => e,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(shown(error)).toMatch(/invalid SOCKS5 address/);
+			expect(shown(error)).toContain("127.0.0.1");
+			expect(shown(error)).not.toContain(USER);
+			expect(shown(error)).not.toContain(PASS);
+		} finally {
+			await rm(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(!posix)("does not put the proxy credentials in the error for an address that does not parse", async () => {
+		const fake = await fakeBinary(
+			`#!/bin/sh\necho socks5://${USER}:${PASS}@[not-an-ip:1080\nexec cat >/dev/null\n`,
+		);
+		try {
+			const error = await startBundledTailscale({ binary: fake.path, timeoutMs: 5_000 }).catch(
+				(e: unknown) => e,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(shown(error)).not.toContain(USER);
+			expect(shown(error)).not.toContain(PASS);
+			expect(shown(error)).toMatch(/invalid SOCKS5 address/);
+		} finally {
+			await rm(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	for (const [label, address] of [
+		["does not parse", "[not-an-ip:1080"],
+		["has a port that cannot be used", "127.0.0.1:0"],
+	] as const) {
+		it.skipIf(!posix)(`stops the launcher when the address ${label}`, async () => {
+			const dir = await mkdtemp(join(tmpdir(), "agx-launcher-pid-test-"));
+			const pidFile = join(dir, "pid");
+			const fake = await fakeBinary(
+				`#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\necho socks5://${USER}:${PASS}@${address}\nexec cat >/dev/null\n`,
+			);
+			let pid = 0;
+			try {
+				await startBundledTailscale({ binary: fake.path, timeoutMs: 5_000 }).catch(() => undefined);
+				pid = Number((await readFile(pidFile, "utf8")).trim());
+				expect(pid).toBeGreaterThan(1);
+				const alive = (): boolean => {
+					try {
+						process.kill(pid, 0);
+						return true;
+					} catch {
+						return false;
+					}
+				};
+				const deadline = Date.now() + 5_000;
+				while (alive() && Date.now() < deadline) {
+					await new Promise((resolve) => setTimeout(resolve, 25));
+				}
+				expect(alive(), "the launcher was left running").toBe(false);
+			} finally {
+				// Only the child this test started.
+				if (pid > 1) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// already gone
+					}
+				}
+				await rm(fake.dir, { recursive: true, force: true });
+				await rm(dir, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it.skipIf(!posix)("still hands back the real credentials in a good address", async () => {
+		const fake = await fakeBinary(
+			`#!/bin/sh\necho socks5://${USER}:${PASS}@127.0.0.1:43299\nexec cat >/dev/null\n`,
+		);
+		const proxy = await startBundledTailscale({ binary: fake.path, timeoutMs: 5_000 });
+		try {
+			expect(proxy.url).toBe(`socks5://${USER}:${PASS}@127.0.0.1:43299`);
+			expect(proxy.address).toBe("127.0.0.1:43299");
+		} finally {
+			await proxy.stop();
+			await rm(fake.dir, { recursive: true, force: true });
+		}
 	});
 });

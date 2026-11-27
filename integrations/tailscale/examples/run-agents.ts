@@ -23,6 +23,25 @@ export function requiredRelay(relay: string | undefined): string {
 	return relay;
 }
 
+/**
+ * The error for an argument an example does not know. A key or secret can land
+ * in an argument by mistake (`--authkey=<key>`, a value typed after a flag that
+ * takes none), so this names an option but never repeats what follows its `=`,
+ * and repeats nothing of an argument that is not an option.
+ */
+export function unknownArgument(arg: string): Error {
+	const help = "Run with --help to see the options.";
+	if (!arg.startsWith("--")) {
+		return new Error(`Unknown argument (its text is not shown, in case it is a key or secret). ${help}`);
+	}
+	const [name] = arg.split("=", 1);
+	return new Error(
+		name === arg
+			? `Unknown option ${name}. ${help}`
+			: `Unknown option ${name} (the value after "=" is not shown). ${help}`,
+	);
+}
+
 /** Run one reviewer/requester pair over a borrowed Tailscale proxy URL. */
 export async function runAgents(options: {
 	relay: string;

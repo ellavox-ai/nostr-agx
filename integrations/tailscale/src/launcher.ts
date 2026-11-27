@@ -10,6 +10,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { redactProxyUrl } from "./proxy-url";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const BINARY_NAME = process.platform === "win32" ? "agx-tailscale.exe" : "agx-tailscale";
@@ -150,11 +151,23 @@ export async function startBundledTailscale(
 	// Callers that own the handle still stop it, which closes stdin first.
 	child.unref();
 
-	const parsed = new URL(url);
+	// The address carries the proxy's user name and password: never put it in an
+	// error, and do not let `new URL` keep it in the error it throws (`input`).
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		child.kill();
+		throw new Error(
+			`The bundled launcher reported an invalid SOCKS5 address: ${redactProxyUrl(url)}`,
+		);
+	}
 	const port = Number(parsed.port);
 	if (!parsed.hostname || !Number.isInteger(port) || port <= 0) {
 		child.kill();
-		throw new Error(`The bundled launcher reported an invalid SOCKS5 address: ${url}`);
+		throw new Error(
+			`The bundled launcher reported an invalid SOCKS5 address: ${redactProxyUrl(url)}`,
+		);
 	}
 	if (!parsed.username || !parsed.password) {
 		child.kill();

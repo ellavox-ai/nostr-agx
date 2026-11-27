@@ -37,7 +37,8 @@ import {
 	TailscaleError,
 	type TailscaleOAuthOptions,
 } from "../src/index";
-import { requiredRelay, runAgents } from "./run-agents";
+import { redactProxyUrl } from "../src/proxy-url";
+import { requiredRelay, runAgents, unknownArgument } from "./run-agents";
 
 interface Options {
 	clientId?: string;
@@ -173,7 +174,7 @@ function parseArgs(argv: string[]): Options {
 		} else if (arg.startsWith("--state-dir=")) {
 			opts.stateDir = arg.slice("--state-dir=".length);
 		} else {
-			throw new Error(`Unknown argument: ${arg}`);
+			throw unknownArgument(arg);
 		}
 	}
 	return opts;
@@ -247,7 +248,7 @@ async function main(): Promise<void> {
 			stateDir,
 			ephemeral: true,
 		});
-		console.info(`tailnet node ${opts.hostname} ready; relay proxy ${tailscale.url}`);
+		console.info(`tailnet node ${opts.hostname} ready; relay proxy ${redactProxyUrl(tailscale.url)}`);
 		console.info(`relay ${relay}`);
 		await runAgents({ relay, relayProxy: tailscale.url });
 	} finally {

@@ -250,7 +250,11 @@ export function updateProfile(name: string, patch: Partial<Profile>): Profile {
 /** Environment overrides are applied per-read rather than persisted, so a
  * one-off `AGX_API_KEY=… agx search` never mutates the stored profile. */
 export function effectiveProfile(name: string): Profile {
-	const stored = getProfile(name);
+	return withEnvOverrides(getProfile(name));
+}
+
+/** The overrides of {@link effectiveProfile}, for a profile that is not saved yet. */
+export function withEnvOverrides(stored: Profile): Profile {
 	return {
 		...stored,
 		apiBaseUrl: process.env.AGX_API_URL ?? stored.apiBaseUrl,

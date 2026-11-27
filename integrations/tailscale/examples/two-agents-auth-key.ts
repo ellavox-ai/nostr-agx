@@ -1,21 +1,25 @@
 /**
  * Two AGX agents over a relay that is only reachable on a tailnet, using an
- * auth key passed as an argument (or the environment).
+ * auth key read from stdin (or the environment).
  *
- * One Tailscale node is started from `--auth-key`, and its loopback SOCKS5
+ * One Tailscale node is started from the key, and its loopback SOCKS5
  * address is passed to both transports as a borrowed `relayProxy`. The node is
  * stopped once at the end. AGX still speaks Nostr; Tailscale only carries the
  * WebSocket dials. For OAuth-issued keys, see `two-agents-oauth.ts`.
  *
- * From the repository root:
+ * From the repository root, with the key kept out of argv (an argument shows in
+ * process listings) and out of shell history:
  *
  *   pnpm install && pnpm build
- *   pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
- *     --auth-key tskey-auth-... \
- *     --relay wss://relay.my-tailnet.ts.net
+ *   printf %s "$TS_AUTHKEY" | \
+ *     pnpm --filter @nostr-agx/tailscale example:two-agents-auth-key -- \
+ *       --auth-key-stdin \
+ *       --relay wss://relay.my-tailnet.ts.net
  *
- * `--auth-key` falls back to TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY, and `--relay`
- * to AGX_RELAY. Prefer an environment variable in shells that record history.
+ * Without `--auth-key-stdin` the key is read from TS_AUTHKEY /
+ * AGX_TAILSCALE_AUTH_KEY, and `--relay` falls back to AGX_RELAY. The key is not
+ * accepted as an argument. The proxy address the node opens carries a user name
+ * and password, so it is printed with those replaced.
  * A fresh temporary Tailscale state directory is used per run so the key's
  * tags are applied; use --state-dir to keep state across runs.
  */
@@ -23,32 +27,37 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	customAuthKey,
 	startTailscaleRelayProxy,
 	TailscaleError,
 } from "../src/index";
-import { requiredRelay, runAgents } from "./run-agents";
+import { redactProxyUrl } from "../src/proxy-url";
+import { requiredRelay, runAgents, unknownArgument } from "./run-agents";
 
 interface Options {
 	authKey?: string;
+	authKeyStdin: boolean;
 	relay?: string;
 	hostname: string;
 	stateDir?: string;
 	help: boolean;
 }
 
-const USAGE = `Usage: example:two-agents-auth-key -- --auth-key <key> --relay <wss-url> [--hostname <name>]
+const USAGE = `Usage: example:two-agents-auth-key -- --auth-key-stdin --relay <wss-url> [--hostname <name>]
 
-  --auth-key <key>   Tailscale auth key (or TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY)
+  --auth-key-stdin   Read the Tailscale auth key from stdin (or set TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY)
   --relay <url>      Private Nostr relay, e.g. wss://relay.my-tailnet.ts.net (or AGX_RELAY)
   --hostname <name>  Tailnet node name (default: agx-two-agents)
   --state-dir <path> Tailscale state dir (default: fresh temporary dir per run)
   --help             Show this message
 
-The key is never printed. One Tailscale node is shared by both agents.`;
+The key is never printed, and is not taken as an argument (process listings
+show arguments). One Tailscale node is shared by both agents.`;
 
 function parseArgs(argv: string[]): Options {
 	const opts: Options = {
 		authKey: process.env.TS_AUTHKEY ?? process.env.AGX_TAILSCALE_AUTH_KEY,
+		authKeyStdin: false,
 		relay: process.env.AGX_RELAY,
 		hostname: "agx-two-agents",
 		stateDir: undefined,
@@ -71,11 +80,13 @@ function parseArgs(argv: string[]): Options {
 		}
 		if (arg === "-h" || arg === "--help") {
 			opts.help = true;
-		} else if (arg === "--auth-key") {
-			opts.authKey = valueFor(arg, i);
-			i += 1;
-		} else if (arg.startsWith("--auth-key=")) {
-			opts.authKey = arg.slice("--auth-key=".length);
+		} else if (arg === "--auth-key-stdin") {
+			opts.authKeyStdin = true;
+		} else if (arg === "--auth-key" || arg.startsWith("--auth-key=")) {
+			// Say nothing of the value: it is a key.
+			throw new Error(
+				"--auth-key is not accepted: an argument shows in process listings. Pipe the key with --auth-key-stdin, or set TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY.",
+			);
 		} else if (arg === "--relay") {
 			opts.relay = valueFor(arg, i);
 			i += 1;
@@ -92,10 +103,25 @@ function parseArgs(argv: string[]): Options {
 		} else if (arg.startsWith("--state-dir=")) {
 			opts.stateDir = arg.slice("--state-dir=".length);
 		} else {
-			throw new Error(`Unknown argument: ${arg}`);
+			throw unknownArgument(arg);
 		}
 	}
 	return opts;
+}
+
+async function readKeyFromStdin(): Promise<string> {
+	if (process.stdin.isTTY) {
+		throw new Error(
+			"--auth-key-stdin needs piped input, e.g. printf %s \"$TS_AUTHKEY\" | pnpm ... example:two-agents-auth-key -- --auth-key-stdin",
+		);
+	}
+	const chunks: Buffer[] = [];
+	for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+	const key = Buffer.concat(chunks).toString("utf8").trim();
+	if (!key) {
+		throw new Error("No Tailscale auth key was available on stdin.");
+	}
+	return key;
 }
 
 async function main(): Promise<void> {
@@ -105,9 +131,10 @@ async function main(): Promise<void> {
 		return;
 	}
 	const relay = requiredRelay(opts.relay);
-	if (!opts.authKey) {
+	const authKey = opts.authKeyStdin ? await readKeyFromStdin() : opts.authKey;
+	if (!authKey) {
 		throw new Error(
-			"Pass --auth-key tskey-... or set TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY.",
+			"Pipe the key with --auth-key-stdin, or set TS_AUTHKEY / AGX_TAILSCALE_AUTH_KEY.",
 		);
 	}
 
@@ -122,12 +149,14 @@ async function main(): Promise<void> {
 		// Start once. Both transports borrow this URL (a bare string), so neither
 		// stops the node — `tailscale.stop()` below is the single owner.
 		tailscale = await startTailscaleRelayProxy({
-			authKey: opts.authKey,
+			// Named after where the key came from, so a malformed key is reported
+			// as coming from stdin or the environment, not as an "argument".
+			authKey: customAuthKey(() => authKey, opts.authKeyStdin ? "stdin" : "the environment"),
 			hostname: opts.hostname,
 			stateDir,
 			ephemeral: true,
 		});
-		console.info(`tailnet node ${opts.hostname} ready; relay proxy ${tailscale.url}`);
+		console.info(`tailnet node ${opts.hostname} ready; relay proxy ${redactProxyUrl(tailscale.url)}`);
 		console.info(`relay ${relay}`);
 		await runAgents({ relay, relayProxy: tailscale.url });
 	} finally {
