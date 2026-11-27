@@ -3,6 +3,8 @@ import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
 import {
+	ALLOWLIST_PAUSED,
+	ALLOWLIST_RESUMED,
 	createCollector,
 	heldList,
 	INBOX_SCHEMA,
@@ -12,7 +14,7 @@ import {
 	summaryLine,
 } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
-import { json, say, warn } from "../lib/output.js";
+import { json, notice, say, warn } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
 import { toHexPubkey } from "../lib/peer.js";
 import { probeRelay } from "../lib/relay-probe.js";
@@ -93,19 +95,30 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 
 	try {
 		const allowed = new Set(profile.allow.map((entry) => toHexPubkey(entry, "allowlist entry")));
-		let warnedAllowlist = false;
+		// True while the list cannot be read: nobody is authorised, so the loop polls nothing.
+		let paused = false;
+		// The code a wait gives when it starts with the list that cannot be read. A wait that ends
+		// still paused exits with it.
+		let unreadableExit: number = EXIT.usage;
 		function refreshAllowed(): void {
 			let current: string[];
 			try {
 				current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
 			} catch (error) {
-				if (!warnedAllowlist) {
-					warnedAllowlist = true;
-					warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+				// Nobody is authorised until it reads cleanly: mail waits on the relays meanwhile. On
+				// stderr, so `--json` output stays whole and the warning is not lost with it.
+				allowed.clear();
+				unreadableExit = error instanceof AgxCliError ? error.exitCode : EXIT.generic;
+				if (!paused) {
+					paused = true;
+					notice(ALLOWLIST_PAUSED);
 				}
 				return;
 			}
-			warnedAllowlist = false;
+			if (paused) {
+				paused = false;
+				notice(ALLOWLIST_RESUMED);
+			}
 			allowed.clear();
 			for (const entry of current) {
 				allowed.add(entry);
@@ -165,37 +178,45 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 					}
 					store.absorbSpool();
 					refreshAllowed();
-					try {
-						const outcome = await pumpWithin(client, remaining, control.signal);
-						if (outcome.interrupted) {
-							interrupted = true;
-							break;
-						}
-						if (outcome.result === null) {
+					if (paused) {
+						// Nothing is fetched, so nothing is stored, held or marked seen, and the cursor stays:
+						// the first poll after the list reads again starts where the last one ended. What
+						// other commands queued is still applied. The relays are still probed below, so the
+						// report shows which answered; a wait that ends still paused is reported as incomplete.
+						store.flush();
+					} else {
+						try {
+							const outcome = await pumpWithin(client, remaining, control.signal);
+							if (outcome.interrupted) {
+								interrupted = true;
+								break;
+							}
+							if (outcome.result === null) {
+								truncated = true;
+								timedOut = true;
+								break;
+							}
+							if (outcome.result.complete) {
+								everRelayAnswered = true;
+								cursor = outcome.result.cursor;
+								truncated = false;
+							} else {
+								truncated = true;
+							}
+						} catch (error) {
+							if (control.signal?.aborted) {
+								interrupted = true;
+								break;
+							}
 							truncated = true;
-							timedOut = true;
-							break;
+							warn(`poll failed: ${error instanceof Error ? error.message : String(error)}`);
 						}
-						if (outcome.result.complete) {
-							everRelayAnswered = true;
-							cursor = outcome.result.cursor;
-							truncated = false;
-						} else {
-							truncated = true;
-						}
-					} catch (error) {
-						if (control.signal?.aborted) {
-							interrupted = true;
-							break;
-						}
-						truncated = true;
-						warn(`poll failed: ${error instanceof Error ? error.message : String(error)}`);
-					}
 
-					seen.holdFor(cursor);
-					store.flush();
-					seen.flush();
-					updateState(profileName, { cursor, lastPumpAt: new Date().toISOString() });
+						seen.holdFor(cursor);
+						store.flush();
+						seen.flush();
+						updateState(profileName, { cursor, lastPumpAt: new Date().toISOString() });
+					}
 					relays = await probe();
 					everRelayAnswered ||= relays.some((relay) => relay.status === "ok");
 					const unread = store.listMessages({ direction: "in", unreadOnly: true }).length;
@@ -239,7 +260,8 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 			}
 			store.flush();
 			seen.flush();
-			updateState(profileName, { cursor, lastPumpAt: new Date().toISOString() });
+			// A wait that ends paused has not polled since the list broke.
+			updateState(profileName, { cursor, ...(paused ? {} : { lastPumpAt: new Date().toISOString() }) });
 		}
 		if (!control.activity) {
 			relays = await probe();
@@ -248,6 +270,11 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 		if (interrupted) {
 			process.exitCode = EXIT.interrupted;
 			return;
+		}
+
+		// A wait that ends while the list still cannot be read has fetched nothing since it broke.
+		if (paused) {
+			truncated = true;
 		}
 
 		const unreadCount = store.listMessages({ direction: "in", unreadOnly: true }).length;
@@ -285,7 +312,10 @@ export async function runInboxCommand(options: InboxOptions, control: InboxRunCo
 			}
 		}
 
-		if (control.activity ? !everRelayAnswered : summary.relays.ok === 0) {
+		if (paused) {
+			// Fails as a wait that starts with this list does, whatever the relays did.
+			process.exitCode = unreadableExit;
+		} else if (control.activity ? !everRelayAnswered : summary.relays.ok === 0) {
 			process.exitCode = EXIT.network;
 		}
 	} finally {

@@ -96,7 +96,7 @@ const LOCAL_SKIPPED = [
 
 /**
  * The allowlist as `serve` and `inbox` read it: every entry must be an npub or a
- * hex pubkey, or they refuse to start. A bad entry is named by its position
+ * hex pubkey, or the list cannot be read. A bad entry is named by its position
  * only, never printed: it may be a secret pasted into the wrong command.
  */
 function allowlistCheck(allow: string[]): Check {
@@ -107,7 +107,7 @@ function allowlistCheck(allow: string[]): Check {
 		return {
 			name: "allowlist",
 			verdict: "fail",
-			detail: `${bad.length === 1 ? "entry" : "entries"} ${bad.join(", ")} of "allow" ${bad.length === 1 ? "is" : "are"} not an npub or a hex pubkey, so serve and inbox will not start`,
+			detail: `${bad.length === 1 ? "entry" : "entries"} ${bad.join(", ")} of "allow" ${bad.length === 1 ? "is" : "are"} not an npub or a hex pubkey, so the allowlist cannot be read and nobody is authorised until it is fixed (inbox and wait will not start)`,
 			remediation: `Remove ${bad.length === 1 ? "it" : "them"} from "allow" in ${configPath()}, then re-run:\n    agx doctor --local`,
 		};
 	}

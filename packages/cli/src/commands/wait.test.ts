@@ -15,6 +15,8 @@ import { agx, capture, jsonDocuments, sandbox } from "../test/helpers.js";
 import { waitCommand } from "./wait.js";
 
 const HELD_SECRET = "held sender text must never reach summary output";
+/** Not a key: what a hand edit gone wrong leaves in the list. Distinctive, so a test can see whether it is printed. */
+const JUNK = "pasted-entry-MARKER-7f3a";
 
 let box: ReturnType<typeof sandbox>;
 let relay: RunningRelay;
@@ -193,6 +195,19 @@ describe("agx wait", () => {
 		expect(summary(run)).toMatchObject({ new: 0, held: 1, timedOut: false });
 		expect(run.stdout).not.toContain(HELD_SECRET);
 		expect(run.stdout).not.toContain(pair.sender);
+	});
+
+	it("stops before pulling anything when the allowlist cannot be read at the start", async () => {
+		const pair = await allowedPair();
+		updateProfile("receiver", { allow: [JUNK] });
+		await publish("sender", pair.receiver, HELD_SECRET);
+
+		const run = await agx("--profile", "receiver", "inbox", "--wait", "1");
+
+		expect(run.code).toBe(EXIT.usage);
+		expect(run.stderr).toContain("is not a valid allowlist entry");
+		expect(new MessageStore(profileDir("receiver")).listMessages()).toEqual([]);
+		expect(new MessageStore(profileDir("receiver")).listHeld()).toEqual([]);
 	});
 
 	it("returns an empty successful result after a quiet healthy timeout", async () => {

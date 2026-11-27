@@ -12,7 +12,7 @@ import kleur from "kleur";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { loadIdentity } from "../lib/identity.js";
-import { createCollector } from "../lib/inbox.js";
+import { ALLOWLIST_PAUSED, ALLOWLIST_RESUMED, ALLOWLIST_UNREADABLE, createCollector } from "../lib/inbox.js";
 import { acquireLock } from "../lib/lock.js";
 import {
 	neutralizeControls,
@@ -182,18 +182,29 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 	const allowed = new Set<string>();
 	// `agx identity allow` and `agx held allow|block` edit the profile while this runs.
 	let warnedAllowlist = false;
+	// True while the list cannot be read: nobody is authorised, so nothing is polled. `--allow-all`
+	// opens tasks to everyone whatever the list says, so it never pauses; it holds every sender instead.
+	let paused = false;
 	function refreshAllowed(): void {
 		let current: string[];
 		try {
 			current = effectiveProfile(profileName).allow.map((entry) => toHexPubkey(entry, "allowlist entry"));
-		} catch (error) {
-			// Keep the last good list; say so once instead of failing every poll.
+		} catch {
+			// Nobody is authorised until it reads cleanly: a peer taken off the list must stop being
+			// allowed at once, not when the file is repaired. A peer given with `--allow` goes too.
+			// Mail waits on the relays meanwhile. Say so once instead of every poll.
+			allowed.clear();
+			paused = !options.allowAll;
 			if (!warnedAllowlist) {
 				warnedAllowlist = true;
-				warn(`The allowlist could not be re-read, so the last good one stays in use: ${error instanceof Error ? error.message : String(error)}`);
+				warn(paused ? ALLOWLIST_PAUSED : ALLOWLIST_UNREADABLE);
 			}
 			return;
 		}
+		if (paused) {
+			info(ALLOWLIST_RESUMED);
+		}
+		paused = false;
 		warnedAllowlist = false;
 		allowed.clear();
 		for (const entry of [...current, ...sessionAllow]) {
@@ -495,7 +506,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			"--allow-all is set: any pubkey on these relays can invoke your capabilities.",
 		);
 	}
-	if (tasksEnabled && allowed.size === 0 && !options.allowAll) {
+	if (tasksEnabled && allowed.size === 0 && !options.allowAll && !paused) {
 		warn(
 			"The allowlist is empty, so every task request will be denied. Add a peer with `agx identity allow <npub>`.",
 		);
@@ -529,7 +540,8 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 		updateState(profileName, {
 			cursor: state.cursor,
 			advertisedAt: state.advertisedAt,
-			lastPumpAt: new Date().toISOString(),
+			// A paused serve has not polled.
+			...(paused ? {} : { lastPumpAt: new Date().toISOString() }),
 			stats,
 		});
 	}
@@ -577,14 +589,21 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			// Before the pump, so a receipt for a send made since the last poll finds its message.
 			refreshAllowed();
 			store.absorbSpool();
-			const result = await client.pump();
-			// Advance ONLY on a complete poll. An incomplete source may still hold
-			// unseen events; advancing past them loses mail permanently.
-			if (result.complete) {
-				state.cursor = result.cursor;
+			if (paused) {
+				// Nothing is fetched, so nothing is stored, held or marked seen, and the cursor stays: the
+				// first poll after the list reads again starts where the last one ended. What other
+				// commands queued is still applied.
+				store.flush();
+			} else {
+				const result = await client.pump();
+				// Advance ONLY on a complete poll. An incomplete source may still hold
+				// unseen events; advancing past them loses mail permanently.
+				if (result.complete) {
+					state.cursor = result.cursor;
+				}
+				seen.holdFor(state.cursor);
+				persist();
 			}
-			seen.holdFor(state.cursor);
-			persist();
 		} catch (error) {
 			say(
 				kleur.red(

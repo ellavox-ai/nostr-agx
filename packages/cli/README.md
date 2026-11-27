@@ -308,6 +308,27 @@ your inbox), `agx held ignore <npub>` or `agx held block <npub>`. These work whi
 runs: it picks up the allowlist and the decision on its next poll. A kept message is capped at
 8,000 characters, all held text at 8 MiB (the oldest goes first) and 30 days.
 
+If the saved allowlist cannot be read while `serve` runs (an entry that is not an npub or
+hex pubkey, after a hand edit), `serve` authorises nobody until it reads cleanly again, and
+pauses: it asks the relays for nothing, so nothing is stored, held, marked as seen, answered or
+run, and it keeps its place in your inbox. It says so once, and says again when the list reads
+cleanly. Then it picks up where it stopped, and what arrived meanwhile is read once, as the
+repaired list decides: there is no `agx held allow` step. Mail waits on the relays for as long
+as they keep it. `serve --once` exits without polling. `--allow-all` opens tasks to everyone
+whatever the list says, so it keeps polling: tasks still run, and every sender is held with their
+text kept, until you run `agx held allow <npub>`. A `config.json` that is gone (deleted, or a link
+to nothing), or a profile removed from it, reads as an empty list, not an unreadable one: `serve`
+keeps polling and holds every sender.
+`agx wait` pauses the same way and still refuses to start when the list cannot be read at the
+start. A wait that reaches `--timeout` with the list still unreadable has fetched nothing, so it
+reports `truncated: true` and exits with the code a wait gives when it starts with that list (2
+for an entry that is not an npub or hex pubkey, 3 for a `config.json` that cannot be read),
+whatever the relays did: a script does not take it for a quiet timeout. If the list was repaired
+before the timeout and nothing came, it is an ordinary quiet timeout, exit 0. `agx gateway`
+holds every sender instead of adding them to its history, while its tasks and webhooks still
+follow each subscription's own `allowedPeers`.
+`agx doctor --local` names the bad entry by position.
+
 `--allowed-only` changes **printing only**. A held message is still counted and
 recorded as seen, `--reply-any` still auto-replies to it, and `--allow-all` still
 opens tasks to everyone (a stranger's `TASK` line prints, but its payload and the

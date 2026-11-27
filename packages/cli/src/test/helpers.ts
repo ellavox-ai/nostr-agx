@@ -5,12 +5,19 @@ import { vi } from "vitest";
 import { runCli } from "../program.js";
 import { setRuntimeForTests } from "../lib/runtime.js";
 
+const STOP_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
 /**
  * A fresh AGX_HOME under the OS temp dir, and a clean AGX_* environment, for
  * one test. `restore()` puts the environment back and deletes the directory.
+ * It also takes off the SIGINT and SIGTERM listeners added since: `agx serve`
+ * adds two on every run and never removes them (a real run is one per
+ * process), so a file that starts it more than ten times would make Node warn
+ * of a possible memory leak.
  */
 export function sandbox(): { home: string; restore: () => void } {
 	const saved = { ...process.env };
+	const listenersBefore = STOP_SIGNALS.map((signal) => process.listeners(signal));
 	const home = mkdtempSync(join(tmpdir(), "agx-test-"));
 	if (!resolve(home).startsWith(resolve(tmpdir()) + sep)) {
 		throw new Error(`refusing to use ${home} as AGX_HOME`);
@@ -31,6 +38,13 @@ export function sandbox(): { home: string; restore: () => void } {
 				}
 			}
 			Object.assign(process.env, saved);
+			STOP_SIGNALS.forEach((signal, i) => {
+				for (const listener of process.listeners(signal)) {
+					if (!listenersBefore[i].includes(listener)) {
+						process.removeListener(signal, listener);
+					}
+				}
+			});
 			rmSync(home, { recursive: true, force: true });
 		},
 	};

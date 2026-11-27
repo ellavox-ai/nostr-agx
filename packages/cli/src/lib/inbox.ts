@@ -8,6 +8,21 @@ import type { MessageStore } from "./store/message-store.js";
 import type { HoldResult, StoredMessage } from "./store/types.js";
 import { renderMessageLines } from "./threads.js";
 
+/**
+ * What a reader that keeps polling says when it cannot read the saved allowlist: the gateway, and
+ * `serve --allow-all`. Fixed text: the entry may be a secret key pasted in by mistake, and a parse
+ * error can quote the file.
+ */
+export const ALLOWLIST_UNREADABLE =
+	"The allowlist cannot be read, so nobody is authorised and every sender's messages are held. They stay held after it is fixed: release a sender with `agx held allow <npub>`. Run `agx doctor --local` to see which entry is wrong.";
+
+/** What `serve` and `wait` say instead: they stop polling until the list reads cleanly. Fixed text, for the same reason. */
+export const ALLOWLIST_PAUSED =
+	"The allowlist cannot be read, so nobody is authorised and polling is paused: nothing is fetched, stored or held until it can be read again. Mail sent meanwhile stays on the relays for as long as they keep it. Run `agx doctor --local` to see which entry is wrong.";
+
+/** What they say when it reads cleanly again. */
+export const ALLOWLIST_RESUMED = "The allowlist can be read again. Polling resumes from where it stopped.";
+
 export const INBOX_SCHEMA = "agx.inbox/1";
 export const INBOX_SUMMARY_SCHEMA = "agx.inbox.summary/1";
 
@@ -50,8 +65,10 @@ export interface InboxSummary {
 	unread: number;
 	held: number;
 	relays: { ok: number; unreachable: number };
-	/** Present for `agx wait`; ordinary one-shot inbox output is unchanged. */
+	/** Present for `agx wait`, with `truncated`; ordinary one-shot inbox output is unchanged. */
 	timedOut?: boolean;
+	/** As in the full report: the batch is not whole. Present for `agx wait` only. */
+	truncated?: boolean;
 }
 
 /** ISO time for a unix-seconds value, or `fallback` when the value is not a time `Date` can hold. */
@@ -182,7 +199,7 @@ export function summarize(report: InboxReport, newCount: number, unreadCount: nu
 			ok: report.relays.filter((r) => r.status === "ok").length,
 			unreachable: report.relays.filter((r) => r.status === "unreachable").length,
 		},
-		...(report.timedOut === undefined ? {} : { timedOut: report.timedOut }),
+		...(report.timedOut === undefined ? {} : { timedOut: report.timedOut, truncated: report.truncated }),
 	};
 }
 

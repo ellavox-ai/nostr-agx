@@ -371,6 +371,15 @@ describe("agx doctor --local", () => {
 		expect(`${run.stdout}${run.stderr}${human.stdout}${human.stderr}`).not.toContain(pasted);
 	});
 
+	it("says a bad allowlist entry leaves nobody authorised, not that serve will not start", async () => {
+		updateProfile("default", { allow: [createIdentity().publicKey, `nsec1${"q".repeat(58)}`] });
+		const { checks } = await local();
+
+		const detail = check(checks, "allowlist")?.detail ?? "";
+		expect(detail).toContain("nobody is authorised");
+		expect(detail).not.toContain("serve and inbox will not start");
+	});
+
 	it("warns, but passes, on an empty allowlist: default-deny is a posture, not a fault", async () => {
 		updateProfile("default", { allow: [] });
 		const { code, checks } = await local();

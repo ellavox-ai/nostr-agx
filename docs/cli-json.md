@@ -79,15 +79,15 @@ Sample: [`samples/inbox.json`](samples/inbox.json), [`samples/inbox-summary.json
 
 ## `agx wait`
 
-`agx wait [--timeout <seconds>] [--summary] [--json]` reuses both inbox schemas and adds `timedOut`. It returns existing unread allowed messages after its first poll. With no unread mail, it waits for a new allowed message, held activity or a receipt, then prints one batch and exits. The default timeout is 600 seconds; allowed values are 1–3600.
+`agx wait [--timeout <seconds>] [--summary] [--json]` reuses both inbox schemas and adds `timedOut` (and, in the summary, `truncated`). It returns existing unread allowed messages after its first poll. With no unread mail, it waits for a new allowed message, held activity or a receipt, then prints one batch and exits. The default timeout is 600 seconds; allowed values are 1–3600.
 
 A quiet healthy timeout exits `0` with no new messages or receipts and `timedOut: true`:
 
 ```json
-{ "schema": "agx.inbox.summary/1", "new": 0, "unread": 0, "held": 0, "relays": { "ok": 1, "unreachable": 0 }, "timedOut": true }
+{ "schema": "agx.inbox.summary/1", "new": 0, "unread": 0, "held": 0, "relays": { "ok": 1, "unreachable": 0 }, "timedOut": true, "truncated": false }
 ```
 
-Activity completed before the deadline returns `timedOut: false`. If the deadline cuts off a pull, `timedOut: true, truncated: true` may still carry a partial batch; show `messages` whenever non-empty. Ordinary `agx inbox` output does not contain the field. If no relay answered during the whole wait, the command exits `5`; another reader holding the profile lock exits `1`; host interruption exits `130`. The consumer marks each displayed thread read with `agx thread <contextId> --mark-read` before starting the next wait. Until then, unread messages intentionally appear again.
+Activity completed before the deadline returns `timedOut: false`. If the deadline cuts off a pull, `timedOut: true, truncated: true` may still carry a partial batch; show `messages` whenever non-empty. Ordinary `agx inbox` output does not contain the field. If the allowed-peers list cannot be read when the wait ends, nothing was fetched while it was unreadable: the result has `truncated: true`, in the summary too, and the command exits with the code `agx wait` gives when it starts with that list (`2` for an entry that is not an npub or hex pubkey, `3` for a `config.json` that cannot be read), whatever the relays did; if the list was repaired before the deadline, it is the quiet timeout above. If no relay answered during the whole wait, the command exits `5`; another reader holding the profile lock exits `1`; host interruption exits `130`. The consumer marks each displayed thread read with `agx thread <contextId> --mark-read` before starting the next wait. Until then, unread messages intentionally appear again.
 
 ## `agx threads` and `agx thread <contextId>`
 
