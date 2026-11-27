@@ -7,6 +7,7 @@ import {
 	verifyEvent,
 } from "@nostr-agx/nostr";
 import kleur from "kleur";
+import WebSocket from "ws";
 import { effectiveProfile, resolveProfileName } from "../lib/config.js";
 import { AgxCliError, EXIT } from "../lib/errors.js";
 import { heading, info, json, kv, say, warn } from "../lib/output.js";
@@ -127,13 +128,22 @@ export async function cardCommand(
 	}
 	const pubkey = toHexPubkey(peer, "agent identity");
 
+	// `ws` is passed explicitly: Node 20 has no global WebSocket, and without one
+	// the lookup finds nothing.
 	const [cardEvents, relayEvents] = await Promise.all([
-		fetchByAuthor({ relays, author: pubkey, kinds: [CARD_KIND], limit: 1 }),
+		fetchByAuthor({
+			relays,
+			author: pubkey,
+			kinds: [CARD_KIND],
+			limit: 1,
+			ws: WebSocket,
+		}),
 		fetchByAuthor({
 			relays,
 			author: pubkey,
 			kinds: [RELAY_LIST_KIND],
 			limit: 1,
+			ws: WebSocket,
 		}),
 	]);
 

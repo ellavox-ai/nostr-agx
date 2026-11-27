@@ -128,25 +128,20 @@ describe("proxy WebSocket wrapping", () => {
 		]);
 	});
 
-	it("fails closed when a ws subclass drops the constructor options", async () => {
+	it("refuses a ws subclass that drops the constructor options", async () => {
 		// The shape that fails open in production: a subclass whose constructor
 		// doesn't pass the third argument on. `ws` records its request (with
-		// the agent it was given) on `this._req` synchronously, so the wrapper
-		// sees the drop the moment super() returns — and must destroy the
-		// direct connection it already started rather than let it run.
+		// the agent it was given) on `this._req` synchronously, so one socket
+		// built when the class is created shows the drop, and the request it
+		// started is destroyed rather than left to run.
 		const destroy = vi.fn();
 		class Dropping extends FakeWebSocket {
 			_req = { agent: "global", destroy };
 			on(): void {}
 		}
-		const Wrapped = await createProxyWebSocket(
-			"socks5://127.0.0.1:1080",
-			Dropping,
-		);
-		expect(
-			() =>
-				new (Wrapped as unknown as typeof Dropping)("wss://relay.example"),
-		).toThrow(RelayProxyError);
+		await expect(
+			createProxyWebSocket("socks5://127.0.0.1:1080", Dropping),
+		).rejects.toBeInstanceOf(RelayProxyError);
 		expect(destroy).toHaveBeenCalledOnce();
 	});
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+A note for library callers that has applied since 0.7.0 and is not new in this release: `NostrTransport.create()` no longer sets a process-wide WebSocket for `nostr-tools` (0.6.0 did). The functions that dial relays by themselves (`fetchByAuthor`, `fetchByAuthorWithStatus`, `resolvePeerCard`, `resolvePeerCardWithStatus`, `resolvePeerRelays`, `resolveNip05`) take the class as their `ws` argument, for example `resolvePeerCard(pubkey, relays, signer, ws)`. Without it they use the runtime's global WebSocket: Node 22 and later have one, and use it instead of `ws`; Node 20 has none, and there a lookup finds nothing and reports no error. Pass `ws`, or call `configureWebSocket(ws)` once, if your code runs on Node 20.
+
+### Changed
+
+- A relay proxy can no longer be combined with the runtime's built-in WebSocket (Node 22 and later) or a class that extends it. That class ignores the proxy agent, so it dialed the relay directly and the proxy was never used, with no error. `createProxyWebSocket`, `wrapWebSocket` and `NostrTransport.create({ relayProxy })` now refuse it with a `RelayProxyError` that says to pass the `ws` class. If your code passed the global `WebSocket` together with `relayProxy`, its traffic was not going through the proxy; pass the `WebSocket` class of the `ws` package instead (the CLI and the n8n nodes already do).
+- `wrapWebSocket`, and so `createProxyWebSocket`, now checks the WebSocket class when it wraps it, if an agent is given: it builds one extra instance of the class, with a stand-in agent and a local socket path, and no network is used. A class that drops the agent on every construction makes `wrapWebSocket` throw a `RelayProxyError` at that point, and `createProxyWebSocket` rejects where the first dial used to throw. A class that counts its instances, or does work in its constructor, sees one more construction for each proxy class.
+- The error shown when `socks-proxy-agent` cannot be loaded has new text: "could not load the optional socks-proxy-agent package: <reason>" instead of "requires the optional socks-proxy-agent package". Code that matches the old wording has to change; `error.cause` still holds the original error.
+- `socks://` as a relay proxy URL: for relays a peer advertises, the proxy is now asked for the address that was looked up and checked on this machine, not the host name, as `socks5://` already did. For your own relays `socks://` still lets the proxy resolve the name.
+
+### Fixed
+
+- `agx card <peer>` found no card on Node 20, whatever the relay held, and printed "No Agent Card found" (exit 6). Node 22 and later were not affected.
+- The `two-agents` example's requester did not find the reviewer's card on Node 20, for the same reason.
+- A WebSocket class that drops the proxy agent on every construction (a subclass that does not pass its options on) is refused when the proxy class is created. Before, a relay given as a bare IP address saw a direct connection from this host before the class was refused on the first dial. A class that drops the agent only for some addresses, or only after its first construction, still starts that direct connection to a relay given as a bare IP address: it is stopped by the check on each dial, which comes after the connection has started.
+- When `socks-proxy-agent` could not be loaded, the error said the package was required even if it was installed, for example when a bundler copied it into the bundle (`Dynamic require of "events" is not supported`). The error now says why loading failed.
+
 ## 0.7.1
 
 Released with `@nostr-agx/core`, `@nostr-agx/nostr` and `@nostr-agx/tailscale` 0.7.1. Only `@nostr-agx/tailscale` changes; the others are released at the same version, as always.

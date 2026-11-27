@@ -85,7 +85,9 @@ let llmDegraded = false;
 // Card off the relay and check it advertises the capability we want.
 let card = null;
 for (let attempt = 0; attempt < 5 && !card; attempt += 1) {
-	card = await resolvePeerCard(peer.publicKey, [RELAY]);
+	// A lookup made outside the transport needs the WebSocket class too: Node 20
+	// has no global one, and without it the lookup finds nothing.
+	card = await resolvePeerCard(peer.publicKey, [RELAY], undefined, WebSocket);
 	if (!card) {
 		log(`waiting for the reviewer's Agent Card… (${attempt + 1}/5)`);
 		await sleep(1_000);
