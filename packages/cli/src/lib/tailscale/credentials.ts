@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
+import { assertFileLockHeld, withFileLock } from "../config-lock.js";
 import { AgxCliError, configError, EXIT } from "../errors.js";
 import {
 	isTooPermissive,
@@ -16,7 +18,14 @@ import {
  *     "oauthClientSecret": "…" | null, "updatedAt": "…" }
  *
  * Both values are bearer secrets. `agx tailscale status` never prints them.
+ *
+ * The file is read, changed and written back whole, so a save and a forget hold a lock beside it
+ * (`tailscale.json.lock`, see config-lock.ts) for that time: two commands that overlap each add their
+ * key instead of one dropping the other's. A read never takes the lock; the write is a rename, so a
+ * read sees the old file or the new one, never half of one.
  */
+
+const SECRETS_LOCK = "Tailscale secrets";
 
 const tailscaleSecretSchema = z.object({
 	version: z.literal(1),
@@ -72,18 +81,28 @@ export function saveTailscaleSecret(
 	profile: string,
 	patch: Partial<Pick<TailscaleSecret, "authKey" | "oauthClientSecret">>,
 ): TailscaleSecret {
-	const previous = loadTailscaleSecret(profile);
-	const next: TailscaleSecret = {
-		...previous,
-		...patch,
-		version: 1,
-		updatedAt: new Date().toISOString(),
-	};
-	writePrivateJson(tailscaleSecretsPath(profile), next);
-	return next;
+	const path = tailscaleSecretsPath(profile);
+	return withFileLock(path, SECRETS_LOCK, () => {
+		const previous = loadTailscaleSecret(profile);
+		const next: TailscaleSecret = {
+			...previous,
+			...patch,
+			version: 1,
+			updatedAt: new Date().toISOString(),
+		};
+		writePrivateJson(path, next, {
+			beforePublish: () => assertFileLockHeld(path, SECRETS_LOCK),
+		});
+		return next;
+	});
 }
 
 /** Remove the profile's Tailscale secrets. Returns whether a file was there. */
 export function forgetTailscaleSecret(profile: string): boolean {
-	return removePrivateFile(tailscaleSecretsPath(profile));
+	const path = tailscaleSecretsPath(profile);
+	// A profile with no folder has no secrets, and the lock would make the folder.
+	if (!existsSync(dirname(path))) {
+		return false;
+	}
+	return withFileLock(path, SECRETS_LOCK, () => removePrivateFile(path));
 }

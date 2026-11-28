@@ -27,8 +27,12 @@ import { dirname, join } from "node:path";
  *     config.json                         profiles: API base, org, relays, allowlist
  *                                         (never a key since 0.4; a 0.3 key is
  *                                         migrated out on the next write)
+ *     config.json.lock                    held for the milliseconds one write of
+ *                                         config.json takes (see config-lock.ts)
  *     credentials.json                    API keys, one per profile, each bound
  *                                         to the one origin it may be sent to
+ *     credentials.json.lock               held for the milliseconds one write of
+ *                                         credentials.json takes (see config-lock.ts)
  *     profiles/<name>/identity.json       the secret key
  *     profiles/<name>/state.json          cursor + listing id
  *     profiles/<name>/seen.json           replay-protection ids
@@ -42,6 +46,8 @@ import { dirname, join } from "node:path";
  *                                         idempotent and background task operations and outcomes
  *     profiles/<name>/tailscale.json       opt-in Tailscale auth key / OAuth client secret
  *                                         (only when `agx tailscale enable` stored one)
+ *     profiles/<name>/tailscale.json.lock  held for the milliseconds one write of
+ *                                         tailscale.json takes (see config-lock.ts)
  */
 
 export function agxHome(): string {
@@ -129,6 +135,11 @@ export interface PrivateWriteOptions {
 	 * with the machine, turns this off.
 	 */
 	sync?: boolean;
+	/**
+	 * Called after the temp file is written and flushed, right before it is renamed into place. If it
+	 * throws, nothing is published and the temp file is removed.
+	 */
+	beforePublish?: () => void;
 }
 
 /**
@@ -141,7 +152,7 @@ export interface PrivateWriteOptions {
 export function writePrivateText(
 	path: string,
 	text: string,
-	{ sync = true }: PrivateWriteOptions = {},
+	{ sync = true, beforePublish }: PrivateWriteOptions = {},
 ): void {
 	ensureDir(dirname(path));
 	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -157,6 +168,7 @@ export function writePrivateText(
 				closeSync(fd);
 			}
 		}
+		beforePublish?.();
 		renameSync(tmp, path);
 	} catch (error) {
 		rmSync(tmp, { force: true });

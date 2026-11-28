@@ -1,7 +1,6 @@
 import kleur from "kleur";
 import {
 	effectiveProfile,
-	getProfile,
 	resolveProfileName,
 	updateProfile,
 } from "../lib/config.js";
@@ -170,12 +169,10 @@ export function identityAllowCommand(
 	options: IdentityOptions,
 ): void {
 	const profileName = resolveProfileName(options.profile);
-	const profile = getProfile(profileName);
-	const next = new Set(profile.allow);
-	for (const peer of peers) {
-		next.add(toHexPubkey(peer, "peer"));
-	}
-	updateProfile(profileName, { allow: [...next] });
+	// Checked before anything is written, so a bad peer changes nothing.
+	const added = peers.map((peer) => toHexPubkey(peer, "peer"));
+	// The list is extended as it is on disk when the config lock is held, not as it was read earlier.
+	updateProfile(profileName, (profile) => ({ allow: [...new Set([...profile.allow, ...added])] }));
 	for (const peer of peers) {
 		ok(`Allowed ${toDisplayNpub(peer)}`);
 	}
@@ -189,11 +186,10 @@ export function identityDenyCommand(
 	options: IdentityOptions,
 ): void {
 	const profileName = resolveProfileName(options.profile);
-	const profile = getProfile(profileName);
 	const remove = new Set(peers.map((p) => toHexPubkey(p, "peer")));
-	updateProfile(profileName, {
+	updateProfile(profileName, (profile) => ({
 		allow: profile.allow.filter((hex) => !remove.has(hex)),
-	});
+	}));
 	for (const peer of peers) {
 		ok(`Removed ${toDisplayNpub(peer)} from the allowlist.`);
 	}

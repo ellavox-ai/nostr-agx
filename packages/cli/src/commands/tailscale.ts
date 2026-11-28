@@ -1,6 +1,5 @@
 import {
 	effectiveProfile,
-	getProfile,
 	resolveProfileName,
 	updateProfile,
 } from "../lib/config.js";
@@ -110,7 +109,6 @@ export async function tailscaleEnableCommand(
 	options: TailscaleEnableOptions,
 ): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
-	const profile = getProfile(profileName);
 	if (
 		(options.authKey !== undefined || options.authKeyStdin) &&
 		oauthRouteRequested(options)
@@ -167,7 +165,7 @@ export async function tailscaleEnableCommand(
 	const tokenAuth = tokenAuthOf(options.oauthTokenAuth);
 	const authMode: "key" | "oauth" = oauthRequested ? "oauth" : "key";
 
-	const next = updateProfile(profileName, {
+	const next = updateProfile(profileName, (profile) => ({
 		tailscale: {
 			...profile.tailscale,
 			enabled: true,
@@ -202,7 +200,7 @@ export async function tailscaleEnableCommand(
 						: profile.tailscale.oauth.tags,
 			},
 		},
-	});
+	}));
 
 	if (authKey || oauthSecret) {
 		saveTailscaleSecret(profileName, {
@@ -264,7 +262,12 @@ export async function tailscaleUpCommand(
 		patch.stateDir = options.stateDir || null;
 	}
 	if (Object.keys(patch).length > 0) {
-		updateProfile(profileName, { tailscale: { ...profile.tailscale, ...patch } });
+		// Built from the profile read once the lock is held, so a change made while this waited is
+		// kept. It is the effective profile (this run's environment overrides included), as it was
+		// when the read was made before the lock.
+		updateProfile(profileName, () => ({
+			tailscale: { ...effectiveProfile(profileName).tailscale, ...patch },
+		}));
 		profile = effectiveProfile(profileName);
 	}
 	const authKey = await secretOption(
@@ -331,14 +334,13 @@ export async function tailscaleDisableCommand(
 	options: TailscaleDisableOptions,
 ): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
-	const profile = getProfile(profileName);
 	let forgot = false;
 	if (options.forget) {
 		forgot = forgetTailscaleSecret(profileName);
 	}
-	const next = updateProfile(profileName, {
+	const next = updateProfile(profileName, (profile) => ({
 		tailscale: { ...profile.tailscale, enabled: false },
-	});
+	}));
 	heading("agx tailscale disable");
 	kv("profile", profileName);
 	kv("opted in", "no");

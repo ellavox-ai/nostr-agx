@@ -42,6 +42,7 @@
 		"test:e2e": "node scripts/e2e-claude-inbox.mjs",
 		"test:e2e:login": "E2E=1 vitest run src/test/login.e2e.test.ts",
 		"test:e2e:serve": "E2E=1 vitest run src/test/serve.e2e.test.ts",
+		"test:e2e:config": "E2E=1 vitest run src/test/config-writes.e2e.test.ts",
 		"test:e2e:tailscale": "E2E=1 vitest run src/test/tailscale.e2e.test.ts",
 		"test:e2e:ui": "node scripts/e2e-ui.mjs"
 	},

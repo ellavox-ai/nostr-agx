@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
+import { assertFileLockHeld, withFileLock } from "./config-lock.js";
 import { configError } from "./errors.js";
 import { credentialsPath, writePrivateJson } from "./paths.js";
 
@@ -9,9 +10,13 @@ import { credentialsPath, writePrivateJson } from "./paths.js";
  *
  *   { "version": 1, "profiles": { "<profile>": CredentialEntry } }
  *
- * Always written `0600` and atomically. Every write re-reads the file first, so
- * two processes (two terminals finishing `agx login` for different profiles)
- * do not drop each other's entries.
+ * Always written `0600` and atomically. The file is read, changed and written
+ * back whole, so a set and a remove hold a lock beside it (`credentials.json.lock`,
+ * see config-lock.ts) for that time: two processes (two terminals finishing
+ * `agx login` for different profiles, a login and a logout) each change the file
+ * as the other left it, and neither drops the other's entry. A read never takes
+ * the lock; the write is a rename, so a read sees the old file or the new one,
+ * never half of one.
  *
  * Callers go through {@link CredentialStore}, so an OS keychain backend can
  * replace the file later without touching them.
@@ -82,23 +87,39 @@ function readCredentialsFile(): CredentialsFile {
 	return parsed.data;
 }
 
+const CREDENTIALS_LOCK = "credentials";
+
 export const fileCredentialStore: CredentialStore = {
 	get(profile) {
 		return readCredentialsFile().profiles[profile] ?? null;
 	},
 	set(profile, entry) {
-		const file = readCredentialsFile();
-		file.profiles[profile] = credentialEntrySchema.parse(entry);
-		writePrivateJson(credentialsPath(), file);
+		const path = credentialsPath();
+		withFileLock(path, CREDENTIALS_LOCK, () => {
+			const file = readCredentialsFile();
+			file.profiles[profile] = credentialEntrySchema.parse(entry);
+			writePrivateJson(path, file, {
+				beforePublish: () => assertFileLockHeld(path, CREDENTIALS_LOCK),
+			});
+		});
 	},
 	remove(profile) {
-		const file = readCredentialsFile();
-		if (!file.profiles[profile]) {
+		const path = credentialsPath();
+		// Nothing to remove: no lock, no write and no folder made. Looked at again once the lock is held.
+		if (!readCredentialsFile().profiles[profile]) {
 			return false;
 		}
-		delete file.profiles[profile];
-		writePrivateJson(credentialsPath(), file);
-		return true;
+		return withFileLock(path, CREDENTIALS_LOCK, () => {
+			const file = readCredentialsFile();
+			if (!file.profiles[profile]) {
+				return false;
+			}
+			delete file.profiles[profile];
+			writePrivateJson(path, file, {
+				beforePublish: () => assertFileLockHeld(path, CREDENTIALS_LOCK),
+			});
+			return true;
+		});
 	},
 	list() {
 		return readCredentialsFile().profiles;
