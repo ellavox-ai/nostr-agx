@@ -93,10 +93,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 				store: messages,
 				allowed,
 				loadAllow,
-				changeAllow: (hex, on) => {
-					const current = getProfile(profileName).allow.filter((entry) => toHexPubkey(entry, "allowlist entry") !== hex);
-					updateProfile(profileName, { allow: on ? [...current, hex] : current });
-				},
+				changeAllow: (hex, on) => changeAllowOnDisk(profileName, hex, on),
 				sync: async () => {
 					pull ??= await createAgxSync({
 						profileName,
@@ -251,6 +248,17 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 		releaseLock();
 		throw error;
 	}
+}
+
+/**
+ * Put `hex` on the profile's allowlist, or take it off. The new list is built from the profile as it
+ * is on disk once the config lock is held, so a change another command made while this waited is kept.
+ */
+export function changeAllowOnDisk(profileName: string, hex: string, on: boolean): void {
+	updateProfile(profileName, (profile) => {
+		const current = profile.allow.filter((entry) => toHexPubkey(entry, "allowlist entry") !== hex);
+		return { allow: on ? [...current, hex] : current };
+	});
 }
 
 function loadAssets(): UiAssets {

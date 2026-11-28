@@ -2,9 +2,11 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TailscaleStartOptions } from "@nostr-agx/tailscale";
 import { getProfile } from "../lib/config.js";
+import { createIdentity } from "../lib/identity.js";
 import { configPath, tailscaleSecretsPath } from "../lib/paths.js";
 import { setStdinForTests } from "../lib/stdin.js";
 import { setTailscaleStarterForTests } from "../lib/tailscale/index.js";
+import { type HeldConfigLock, holdConfigLockUntilSomeoneWaits, PATIENT_TEST_MS } from "../test/config-lock-helpers.js";
 import { agx, jsonDocuments, sandbox } from "../test/helpers.js";
 
 const KEY = "tskey-auth-k1234567890CNTRL-abcdefghijklmnop";
@@ -237,5 +239,84 @@ describe("agx tailscale up / disable", () => {
 			enabled: false,
 			forgot: true,
 		});
+	});
+});
+
+describe("agx tailscale while another agx command is writing config.json", () => {
+	// Each test starts another process that holds the config lock, waits until the command under
+	// test is queued behind it, changes config.json and lets go. A command that read the profile
+	// before it asked for the lock then writes back a copy that is out of date.
+	let held: HeldConfigLock | undefined;
+
+	afterEach(() => {
+		held?.child.kill("SIGKILL");
+		held = undefined;
+	});
+
+	async function enabledProfile(): Promise<void> {
+		fakeStarter();
+		const run = await withStdin(KEY, () => agx("tailscale", "enable", "--auth-key-stdin", "--no-up"));
+		expect(run.code, run.stderr).toBe(0);
+		calls = [];
+	}
+
+	it("disable keeps a hostname another command stored while it waited for the lock", async () => {
+		await enabledProfile();
+		held = await holdConfigLockUntilSomeoneWaits('c.profiles.default.tailscale.hostname = "agx-from-another";');
+
+		const run = await agx("tailscale", "disable");
+
+		expect(run.code, run.stderr).toBe(0);
+		expect(await held.sawWaiter).toBe(true);
+		expect(getProfile("default").tailscale).toMatchObject({ enabled: false, hostname: "agx-from-another" });
+	}, PATIENT_TEST_MS);
+
+	it("up does not switch Tailscale back on when a disable finished while it waited for the lock", async () => {
+		await enabledProfile();
+		held = await holdConfigLockUntilSomeoneWaits("c.profiles.default.tailscale.enabled = false;");
+
+		const run = await agx("tailscale", "up", "--hostname", "agx-new");
+
+		expect(run.code, run.stderr).toBe(0);
+		expect(await held.sawWaiter).toBe(true);
+		expect(getProfile("default").tailscale).toMatchObject({ enabled: false, hostname: "agx-new" });
+	}, PATIENT_TEST_MS);
+
+	it("enable keeps a state directory another command stored while it waited for the lock", async () => {
+		await enabledProfile();
+		held = await holdConfigLockUntilSomeoneWaits('c.profiles.default.tailscale.stateDir = "/state/from-another";');
+
+		const run = await agx("tailscale", "enable", "--no-up", "--hostname", "agx-next");
+
+		expect(run.code, run.stderr).toBe(0);
+		expect(await held.sawWaiter).toBe(true);
+		expect(getProfile("default").tailscale).toMatchObject({
+			enabled: true,
+			hostname: "agx-next",
+			stateDir: "/state/from-another",
+		});
+	}, PATIENT_TEST_MS);
+
+	it("disable also keeps an allowlist entry another command added while it waited", async () => {
+		await enabledProfile();
+		const peer = createIdentity().publicKey;
+		held = await holdConfigLockUntilSomeoneWaits(`c.profiles.default.allow.push(${JSON.stringify(peer)});`);
+
+		const run = await agx("tailscale", "disable");
+
+		expect(run.code, run.stderr).toBe(0);
+		expect(await held.sawWaiter).toBe(true);
+		expect(getProfile("default").allow).toEqual([peer]);
+		expect(getProfile("default").tailscale.enabled).toBe(false);
+	}, PATIENT_TEST_MS);
+
+	it("up with no other writer stores the new hostname and leaves the rest as it was", async () => {
+		await enabledProfile();
+		const before = getProfile("default").tailscale;
+
+		const run = await agx("tailscale", "up", "--hostname", "agx-new");
+
+		expect(run.code, run.stderr).toBe(0);
+		expect(getProfile("default").tailscale).toEqual({ ...before, hostname: "agx-new" });
 	});
 });
