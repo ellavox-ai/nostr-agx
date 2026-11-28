@@ -53,6 +53,8 @@ export interface MockResponse {
 export interface LoggedRequest {
 	method: string;
 	path: string;
+	/** The query string with its `?`, or "" when the request has none. */
+	search: string;
 	headers: Record<string, string | string[] | undefined>;
 	body: unknown;
 }
@@ -518,6 +520,7 @@ export async function startMockIndexServer(
 			requests.push({
 				method: req.method ?? "GET",
 				path: url.pathname,
+				search: url.search,
 				headers: req.headers,
 				body,
 			});

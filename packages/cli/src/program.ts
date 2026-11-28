@@ -1,4 +1,5 @@
-import { Command, CommanderError, Option } from "commander";
+import { holdsHexRun } from "@nostr-agx/nostr";
+import { Command, CommanderError, Help, Option } from "commander";
 import kleur from "kleur";
 import { cardCommand } from "./commands/card.js";
 import {
@@ -67,11 +68,15 @@ import { uiCommand } from "./commands/ui.js";
 import { waitCommand } from "./commands/wait.js";
 import { whoamiCommand } from "./commands/whoami.js";
 import { AgxCliError, EXIT, HumanActionRequiredError } from "./lib/errors.js";
+import { checkInputs } from "./lib/input-boundary.js";
 import {
 	emitStdoutJson,
+	errLine,
 	isJsonMode,
 	setColor,
 	setJsonMode,
+	writeErr,
+	writeOut,
 } from "./lib/output.js";
 import { holdsSecretKey, redactSecrets } from "./lib/secrets.js";
 import { AGX_CLI_VERSION } from "./lib/version.js";
@@ -84,13 +89,38 @@ import { AGX_CLI_VERSION } from "./lib/version.js";
 const CATEGORY_HELP =
 	"category slug (repeatable): finance, sales, marketing, customer-support, hr, legal, operations, engineering, devops, data, research, productivity, communication, commerce, security";
 
+/** A run of this many hex digits in a parser error is hidden: a key one or two digits short is a key after a few guesses. */
+const PARSER_HEX_DIGITS = 56;
+
+/** Printed instead of a parser error that quotes a long run of hex digits: a secret key written as hex looks like a public key or an id. */
+const PARSER_ERROR_WITH_HEX_RUN =
+	"error: the command line may contain a secret key (a run of 56 or more hex digits), so the error that quotes it is not shown. Check the arguments with `agx --help`.\n";
+
+/** Commander's "too many arguments" line: the part before the colon holds nothing that was typed, the words after it are what was typed. */
+const TOO_MANY_ARGUMENTS = /^(error: too many arguments for '[A-Za-z0-9 _-]+'\. Expected \d+ arguments? but got \d+): [\s\S]*\n$/;
+
 /** Printed instead of a parser error that quotes a secret key. */
 const PARSER_ERROR_WITH_SECRET_KEY =
 	"error: the command line contains a secret key (nsec1…), so the error that quotes it is not shown. Check the arguments with `agx --help`.\n";
 
 /** Printed instead of ANY parser error of `identity import`: its argument can only be a secret, in any format (hex looks like a public key everywhere else). */
 const PARSER_ERROR_OF_IMPORT =
-	"error: `agx identity import` could not read its arguments, so they are not shown (they may hold a secret key). Usage: agx identity import [secret] [--stdin] [--force]; see `agx identity import --help`.\n";
+	"error: `agx identity import` could not read its arguments, so they are not shown (they may hold a secret key). Usage: agx identity import --stdin [--force] or agx identity import --from-env <name> [--force]; see `agx identity import --help`.\n";
+
+/** Why the help of every command that takes a secret leads with the way that keeps it off the command line. */
+const KEY_ON_THE_COMMAND_LINE = "a key typed on the command line stays in the shell's history and in the process list";
+
+/** What the parser may print for `text`: the error as commander wrote it, unless it quotes a key. */
+function parserErrorToShow(text: string): string {
+	if (holdsSecretKey(text)) {
+		return PARSER_ERROR_WITH_SECRET_KEY;
+	}
+	if (!holdsHexRun(text, PARSER_HEX_DIGITS)) {
+		return text;
+	}
+	const tooMany = TOO_MANY_ARGUMENTS.exec(text);
+	return tooMany ? `${tooMany[1]}: the words may contain a secret key and are not shown.\n` : PARSER_ERROR_WITH_HEX_RUN;
+}
 
 /**
  * Build a fresh `agx` program. A factory, not a module-level singleton,
@@ -110,7 +140,11 @@ export function buildProgram(): Command {
 	// not come back: the message is replaced, not edited, so no part of it survives.
 	// Set before any subcommand exists: subcommands copy it when created.
 	program.configureOutput({
-		outputError: (text, write) => write(holdsSecretKey(text) ? PARSER_ERROR_WITH_SECRET_KEY : text),
+		// Help, the version and the parser's own errors are written by commander: through the scrubbing writers, like every other line.
+		writeOut,
+		writeErr,
+		outputError: (text, write) =>
+			write(parserErrorToShow(text)),
 	});
 
 	program
@@ -122,7 +156,7 @@ export function buildProgram(): Command {
 		.option("-p, --profile <name>", "profile to use (env: AGX_PROFILE)")
 		.option("--json", "emit machine-readable JSON")
 		.option("--no-color", "disable coloured output")
-		.hook("preAction", (thisCommand) => {
+		.hook("preAction", (thisCommand, actionCommand) => {
 			const opts = thisCommand.opts();
 			setJsonMode(Boolean(opts.json));
 			// Only ever turn colour OFF. kleur already disables itself when stdout is
@@ -131,6 +165,8 @@ export function buildProgram(): Command {
 			if (opts.color === false) {
 				setColor(false);
 			}
+			// The one place every typed value is looked at, before any command runs.
+			checkInputs(actionCommand);
 		});
 
 	/**
@@ -215,8 +251,12 @@ export function buildProgram(): Command {
 		.action((options) => configShowCommand(withGlobals(options)));
 	config
 		.command("set <key> [value]")
-		.description(
+		.usage("apiKey --stdin\n       agx config set [options] <key> [value]")
+		.summary(
 			"set apiBaseUrl | apiKey | orgSlug | relays | org | nip05 (apiKey: pipe it with --stdin)",
+		)
+		.description(
+			`set apiBaseUrl | apiKey | orgSlug | relays | org | nip05. Pipe an apiKey in with --stdin: ${KEY_ON_THE_COMMAND_LINE}.`,
 		)
 		.option("--stdin", "read the value from stdin (one line)")
 		.action((key, value, options) =>
@@ -236,7 +276,11 @@ export function buildProgram(): Command {
 
 	const identity = program
 		.command("identity")
-		.description("manage this agent's keypair and peer allowlist");
+		.description("manage this agent's keypair and peer allowlist")
+		// The list of subcommands shows `import [options]`: the way to give the key is in its own help.
+		.configureHelp({
+			subcommandTerm: (cmd) => (cmd.name() === "import" ? "import [options]" : new Help().subcommandTerm(cmd)),
+		});
 	identity
 		.command("new")
 		.description("generate a keypair and store it in the profile")
@@ -248,8 +292,13 @@ export function buildProgram(): Command {
 		.action((options) => identityShowCommand(withGlobals(options)));
 	identity
 		.command("import [secret]")
-		.description("import an nsec1… or 64-char hex secret key")
+		.usage("--stdin [--force]\n       agx identity import --from-env <name> [--force]")
+		.summary("import a secret key (pipe it in with --stdin)")
+		.description(
+			`import a secret key (an nsec or 64 hex digits). Pipe it in with --stdin or read it from an environment variable with --from-env: ${KEY_ON_THE_COMMAND_LINE}.`,
+		)
 		.option("--stdin", "read the secret from stdin")
+		.option("--from-env <name>", "read the secret from the environment variable NAME (agx does not clear it)")
 		.option("--force", "replace an existing identity")
 		.configureOutput({
 			outputError: (_text, write) => write(PARSER_ERROR_OF_IMPORT),
@@ -736,13 +785,17 @@ export function buildProgram(): Command {
 		);
 	tailscale
 		.command("enable")
-		.description("configure Tailscale auth for this profile and verify the proxy")
-		.option("--auth-key <key>", "Tailscale auth key (prefer --auth-key-stdin)")
+		.usage("[--auth-key-stdin | --oauth-client-secret-stdin] [options]")
+		.summary("configure Tailscale auth for this profile and verify the proxy")
+		.description(
+			`configure Tailscale auth for this profile and verify the proxy. Pass a key with --auth-key-stdin or a client secret with --oauth-client-secret-stdin: ${KEY_ON_THE_COMMAND_LINE}.`,
+		)
 		.option("--auth-key-stdin", "read the Tailscale auth key from stdin")
+		.option("--auth-key <key>", "Tailscale auth key (prefer --auth-key-stdin)")
 		.option("--oauth-url <url>", "OAuth token URL of the authentication service")
 		.option("--oauth-client-id <id>", "OAuth client id")
-		.option("--oauth-client-secret <secret>", "OAuth client secret (prefer stdin)")
 		.option("--oauth-client-secret-stdin", "read the OAuth client secret from stdin")
+		.option("--oauth-client-secret <secret>", "OAuth client secret (prefer stdin)")
 		.option("--oauth-scope <scope>", "OAuth scope to request")
 		.option("--oauth-tailnet <tailnet>", "tailnet for a minted key (default -)")
 		.addOption(
@@ -760,9 +813,13 @@ export function buildProgram(): Command {
 		.action((options) => tailscaleEnableCommand(withGlobals(options)));
 	tailscale
 		.command("up")
-		.description("verify the profile can start its bundled Tailscale proxy")
-		.option("--auth-key <key>", "one-off Tailscale auth key (not stored)")
+		.usage("[--auth-key-stdin] [options]")
+		.summary("verify the profile can start its bundled Tailscale proxy")
+		.description(
+			`verify the profile can start its bundled Tailscale proxy. Pass a one-off key with --auth-key-stdin: ${KEY_ON_THE_COMMAND_LINE}.`,
+		)
 		.option("--auth-key-stdin", "read a one-off Tailscale auth key from stdin")
+		.option("--auth-key <key>", "one-off Tailscale auth key (not stored)")
 		.option("--hostname <name>", "hostname to request from Tailscale")
 		.option("--state-dir <path>", "persistent tsnet state dir (default: fresh dir under AGX_HOME per run)")
 		.option("-v, --verbose", "log transport activity")
@@ -808,30 +865,30 @@ export function reportCliError(error: unknown): number {
 			return error.exitCode;
 		}
 		const action = error.actionRequired;
-		console.error(`\n${kleur.yellow("!")} ${error.message}`);
-		console.error(`\n  ${kleur.bold(action.url)}`);
+		errLine(`\n${kleur.yellow("!")} ${error.message}`);
+		errLine(`\n  ${kleur.bold(action.url)}`);
 		if (action.userCode) {
-			console.error(`  code ${kleur.bold(action.userCode)}`);
+			errLine(`  code ${kleur.bold(action.userCode)}`);
 		}
 		if (error.remediation) {
-			console.error(kleur.dim(`\n  ${error.remediation}\n`));
+			errLine(kleur.dim(`\n  ${error.remediation}\n`));
 		}
 		return error.exitCode;
 	}
 	// Every error line passes through redactSecrets: no key agx has sent may be
 	// printed, whatever wrote the message.
 	if (error instanceof AgxCliError) {
-		console.error(`\n${kleur.red("✗")} ${redactSecrets(error.message)}`);
+		errLine(`\n${kleur.red("✗")} ${redactSecrets(error.message)}`);
 		if (error.remediation) {
-			console.error(kleur.dim(`\n  ${redactSecrets(error.remediation)}\n`));
+			errLine(kleur.dim(`\n  ${redactSecrets(error.remediation)}\n`));
 		}
 		return error.exitCode;
 	}
-	console.error(
+	errLine(
 		`\n${kleur.red("✗")} ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
 	);
 	if (process.env.AGX_DEBUG && error instanceof Error && error.stack) {
-		console.error(redactSecrets(error.stack));
+		errLine(redactSecrets(error.stack));
 	}
 	return EXIT.generic;
 }

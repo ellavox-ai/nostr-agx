@@ -1,9 +1,11 @@
+import { format } from "node:util";
 import type { AgxLogger } from "@nostr-agx/core";
 import { NostrTransport } from "@nostr-agx/nostr";
 import WebSocket, { type ClientOptions } from "ws";
 import type { Profile } from "./config.js";
 import { configError } from "./errors.js";
 import type { Identity } from "./identity.js";
+import { errLine } from "./output.js";
 import { tailscaleRelayProxyForProfile } from "./tailscale/index.js";
 
 /** How long a relay may take to accept the WebSocket upgrade. */
@@ -83,14 +85,16 @@ export function makeLogger(verbose: boolean): AgxLogger | undefined {
 	if (!verbose) {
 		return undefined;
 	}
+	// `format` writes the line the way `console.error` would, so the scrub sees the
+	// text that would have been printed, including what is inside `meta`.
 	return {
 		debug: (message: string, meta?: unknown) =>
-			console.error("[agx:debug]", message, meta ?? ""),
+			errLine(format("[agx:debug]", message, meta ?? "")),
 		info: (message: string, meta?: unknown) =>
-			console.error("[agx:info]", message, meta ?? ""),
+			errLine(format("[agx:info]", message, meta ?? "")),
 		warn: (message: string, meta?: unknown) =>
-			console.error("[agx:warn]", message, meta ?? ""),
+			errLine(format("[agx:warn]", message, meta ?? "")),
 		error: (message: string, meta?: unknown) =>
-			console.error("[agx:error]", message, meta ?? ""),
+			errLine(format("[agx:error]", message, meta ?? "")),
 	};
 }

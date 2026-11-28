@@ -5,6 +5,7 @@ import {
 	localSigner,
 	NostrTransport,
 	publicKeyFromSecret,
+	readSecretKeyInput,
 	toNpub,
 } from "@nostr-agx/nostr";
 import type {
@@ -49,22 +50,22 @@ function urlProtocol(input: string): string | null {
 	}
 }
 
-/** Accept an `nsec1…` key or a bare 64-character hex secret, as the CLI does.
- * `@nostr-agx/nostr` deliberately exposes no nsec codec, so `nostr-tools`'
- * `nip19` is used directly. */
+/** Accept an `nsec1…` key (also in capitals, or behind `nostr:`) or a bare 64-character
+ * hex secret, as the CLI does: `@nostr-agx/nostr` says which of the two was typed.
+ * It deliberately exposes no nsec codec, so `nostr-tools`' `nip19` is used directly. */
 export function parseSecretKey(input: string): Uint8Array {
-	const trimmed = input.trim();
-	if (trimmed.startsWith("nsec1")) {
-		const secretKey = decodeNsec(trimmed);
+	const key = readSecretKeyInput(input);
+	if (key?.kind === "nsec") {
+		const secretKey = decodeNsec(key.bech32);
 		if (!secretKey) {
 			throw new Error("The secret key is not a valid nsec1… key.");
 		}
 		return secretKey;
 	}
-	if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-		return hexToBytes(trimmed.toLowerCase());
+	if (key?.kind === "hex") {
+		return hexToBytes(key.hex);
 	}
-	if (trimmed.startsWith("npub1")) {
+	if (input.trim().startsWith("npub1")) {
 		throw new Error(
 			"That is a public key (npub1…). The credential needs the agent's secret key: nsec1… or 64 hex characters.",
 		);

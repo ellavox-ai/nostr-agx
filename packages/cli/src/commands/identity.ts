@@ -16,7 +16,7 @@ import {
 	saveIdentity,
 	toNsec,
 } from "../lib/identity.js";
-import { heading, info, json, kv, ok, say, warn } from "../lib/output.js";
+import { emitStdoutJson, heading, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { identityPath } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { signNonceEvent } from "../lib/proof.js";
@@ -29,6 +29,7 @@ export interface IdentityOptions {
 	hex?: boolean;
 	nsec?: boolean;
 	stdin?: boolean;
+	fromEnv?: string;
 }
 
 export function identityNewCommand(options: IdentityOptions): void {
@@ -75,29 +76,58 @@ export function identityShowCommand(options: IdentityOptions): void {
 	});
 }
 
+const ENV_REMEDIATION =
+	"Set the variable to the key in the environment this command runs in, or pipe the key in with --stdin.";
+
+/**
+ * The text of the environment variable `name`, which holds the secret key for `--from-env`.
+ * Only the name is ever shown (the input check has already seen that it is a plain name and
+ * not a key); the value goes on to the same reading as text from standard input and is never
+ * printed. The variable is left as it is: it belongs to whoever started the command.
+ */
+function readSecretFromEnv(name: string): string {
+	// Own property only: `process.env` inherits from Object.prototype, so `process.env.toString` is a function.
+	const value = Object.hasOwn(process.env, name) ? process.env[name] : undefined;
+	if (value === undefined) {
+		throw usageError(`The environment variable ${name} is not set.`, ENV_REMEDIATION);
+	}
+	if (!value.trim()) {
+		throw usageError(`The environment variable ${name} is empty.`, ENV_REMEDIATION);
+	}
+	return value;
+}
+
 export async function identityImportCommand(
 	secret: string | undefined,
 	options: IdentityOptions,
 ): Promise<void> {
 	const profileName = resolveProfileName(options.profile);
+	if (options.fromEnv !== undefined && (secret !== undefined || options.stdin)) {
+		throw usageError(
+			"Give the key one way only: as an argument, with --stdin or with --from-env.",
+			"Use one of:\n    agx identity import --stdin\n    agx identity import --from-env NAME",
+		);
+	}
 	if (identityExists(profileName) && !options.force) {
 		throw new AgxCliError(
 			`Profile "${profileName}" already has an identity.`,
 			{
 				exitCode: EXIT.config,
 				remediation:
-					"Import into a fresh profile:\n    agx identity import <nsec> --profile imported\n  Or overwrite:  agx identity import <nsec> --force",
+					"Import into a fresh profile:\n    agx identity import --stdin --profile imported\n  Or overwrite:  agx identity import --stdin --force",
 			},
 		);
 	}
 	let raw = secret;
-	if (options.stdin || !raw) {
+	if (options.fromEnv !== undefined) {
+		raw = readSecretFromEnv(options.fromEnv);
+	} else if (options.stdin || !raw) {
 		raw = await readStdin();
 	}
 	if (!raw?.trim()) {
 		throw usageError(
 			"No secret key provided.",
-			"agx identity import nsec1…    (or pipe it: echo nsec1… | agx identity import --stdin)",
+			'Pipe it in, so it never appears in argv:\n    printf %s "$KEY" | agx identity import --stdin\n  Or read it from an environment variable:\n    agx identity import --from-env NAME',
 		);
 	}
 	const identity = identityFromSecret(parseSecretInput(raw), "imported");
@@ -119,8 +149,9 @@ export function identityExportCommand(options: IdentityOptions): void {
 			},
 		);
 	}
-	// Deliberately bypasses the output helpers: this is data, not a report, and
-	// must survive `--json` and a non-TTY pipe unchanged.
+	// The ONE print of a secret key, by command: it goes around the output helpers
+	// (and so the scrub) on purpose, because the key is what was asked for. It is data,
+	// not a report, and must survive `--json` and a non-TTY pipe unchanged.
 	console.log(
 		options.hex
 			? identity.secretKeyHex
@@ -159,10 +190,9 @@ export async function identitySignCommand(
 	const identity = loadIdentity(profileName);
 	const event = await signNonceEvent(identity.signer, nonce.trim());
 
-	// Deliberately bypasses the output helpers, for the same reason
-	// `identityExportCommand` does: this is data to be pasted or piped, and it
-	// must survive `--json` and a non-TTY pipe byte for byte.
-	console.log(JSON.stringify(event));
+	// Data to be pasted or piped, so it survives `--json` and a non-TTY pipe, but
+	// not unscrubbed: the event is built from a nonce somebody else sent.
+	emitStdoutJson(event);
 }
 
 export function identityAllowCommand(

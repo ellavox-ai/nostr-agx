@@ -282,12 +282,22 @@ describe("an ordinary mistake in identity import still gets a helpful message", 
 		expect(run.stderr).toContain("Expected an `nsec1…` key or a 64-character hex secret key.");
 	});
 
-	it("says how to give a key when there is none", async () => {
+	it("says how to give a key when there is none, leading with the ways that keep it off the command line", async () => {
 		restoreStdin = setStdinForTests(null);
 		const run = await agx("identity", "import", "--force");
 		expect(run.code).toBe(EXIT.usage);
-		expect(run.stderr).toContain("No secret key provided.");
-		expect(run.stderr).toContain("agx identity import nsec1…");
+		expect(plain(run.stderr)).toBe(
+			'\n✗ No secret key provided.\n\n  Pipe it in, so it never appears in argv:\n    printf %s "$KEY" | agx identity import --stdin\n  Or read it from an environment variable:\n    agx identity import --from-env NAME\n\n',
+		);
+		expect(run.stderr).not.toContain("nsec1");
+	});
+
+	it("suggests --stdin, not a key on the command line, when the profile already has an identity", async () => {
+		const run = await agx("identity", "import", flip(NSEC, 30));
+		expect(run.code).toBe(EXIT.config);
+		expect(plain(run.stderr)).toBe(
+			'\n✗ Profile "default" already has an identity.\n\n  Import into a fresh profile:\n    agx identity import --stdin --profile imported\n  Or overwrite:  agx identity import --stdin --force\n\n',
+		);
 	});
 
 	it("says the profile already has an identity, and does not read the key", async () => {

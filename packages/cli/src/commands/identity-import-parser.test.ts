@@ -20,7 +20,7 @@ const NCRYPTSEC = encrypt(hexToBytes(createIdentity().secretKeyHex), "throwaway-
 const TEXT = "correct-horse-battery-staple-1234";
 /** The whole of what is printed instead: pinned exactly, so it cannot be edited into one that shows part of an argument. */
 const REPLACED =
-	"error: `agx identity import` could not read its arguments, so they are not shown (they may hold a secret key). Usage: agx identity import [secret] [--stdin] [--force]; see `agx identity import --help`.\n";
+	"error: `agx identity import` could not read its arguments, so they are not shown (they may hold a secret key). Usage: agx identity import --stdin [--force] or agx identity import --from-env <name> [--force]; see `agx identity import --help`.\n";
 
 /** The first 10-character stretch of `key` found in `shown`, in any case, starting `from` characters in (past a constant prefix); null if none. */
 function leakedPart(shown: string, key: string, from = 0): string | null {
@@ -62,6 +62,10 @@ describe("a parser error of identity import", () => {
 		["the key given to --force", ["identity", "import", `--force=${HEX}`]],
 		["the key given to --stdin", ["identity", "import", `--stdin=${HEX}`]],
 		["any other text written as an option", ["identity", "import", `--${TEXT}`]],
+		["--from-env without a name", ["identity", "import", "--from-env"]],
+		["--from-env without a name, and a key before it", ["identity", "import", HEX, "--from-env"]],
+		["--from-env and two words after it", ["identity", "import", "--from-env", "SOME_VARIABLE", HEX, "extra"]],
+		["the key given to --from-env as an option of its own", ["identity", "import", `--from-env=${HEX}`, "extra", "more"]],
 	])("%s: says why and prints none of the arguments", async (_name, args) => {
 		const run = await agx(...args);
 		for (const out of [run.stdout, run.stderr]) {
