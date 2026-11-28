@@ -1,5 +1,5 @@
 import kleur from "kleur";
-import { effectiveProfile, getProfile, resolveProfileName, updateProfile } from "../lib/config.js";
+import { effectiveProfile, resolveProfileName, updateProfile } from "../lib/config.js";
 import { tryAcquireLock } from "../lib/lock.js";
 import { info, json, ok, say, shortNpub, table } from "../lib/output.js";
 import { profileDir } from "../lib/paths.js";
@@ -46,11 +46,9 @@ export function heldDecideCommand(decision: HeldDecision, peer: string, options:
 	const dir = profileDir(profileName);
 	// The allowlist first: if this stops early, running it again finishes the job.
 	if (decision === "allow") {
-		const profile = getProfile(profileName);
-		updateProfile(profileName, { allow: [...new Set([...profile.allow, hex])] });
+		updateProfile(profileName, (profile) => ({ allow: [...new Set([...profile.allow, hex])] }));
 	} else if (decision === "block") {
-		const profile = getProfile(profileName);
-		updateProfile(profileName, { allow: profile.allow.filter((entry) => entry !== hex) });
+		updateProfile(profileName, (profile) => ({ allow: profile.allow.filter((entry) => entry !== hex) }));
 	}
 	let released = 0;
 	let queued = false;

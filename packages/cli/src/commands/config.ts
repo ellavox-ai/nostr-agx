@@ -18,6 +18,7 @@ import {
 	saveConfig,
 	updateProfile,
 } from "../lib/config.js";
+import { withConfigLock } from "../lib/config-lock.js";
 import {
 	type CredentialEntry,
 	getCredential,
@@ -274,15 +275,23 @@ export async function configSetCommand(
 }
 
 export function configUseCommand(profileName: string): void {
-	const config = loadConfig();
-	if (!config.profiles[profileName]) {
-		// Creating on switch is deliberate: a new profile is the supported way to
-		// hold a second identity or a second organization's key.
-		config.profiles[profileName] = getProfile(profileName);
+	// The lock covers the read and the write, so a profile created or an allowlist changed by a
+	// command running at the same time is not dropped.
+	const created = withConfigLock(() => {
+		const config = loadConfig();
+		const isNew = !config.profiles[profileName];
+		if (isNew) {
+			// Creating on switch is deliberate: a new profile is the supported way to
+			// hold a second identity or a second organization's key.
+			config.profiles[profileName] = getProfile(profileName);
+		}
+		config.currentProfile = profileName;
+		saveConfig(config);
+		return isNew;
+	});
+	if (created) {
 		info(`Created profile "${profileName}".`);
 	}
-	config.currentProfile = profileName;
-	saveConfig(config);
 	ok(`Active profile is now "${profileName}".`);
 }
 
