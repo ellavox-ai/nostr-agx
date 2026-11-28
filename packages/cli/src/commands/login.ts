@@ -47,6 +47,7 @@ import {
 } from "../lib/errors.js";
 import {
 	emitStderrJson,
+	errLine,
 	isJsonMode,
 	json,
 	maskEmail,
@@ -600,10 +601,10 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
 		if (jsonMode) {
 			emitStderrJson({ actionRequired: action });
 		} else {
-			console.error(
+			errLine(
 				`\nOpen ${kleur.bold(action.url)} and check the code ${kleur.bold(action.userCode ?? "")} (expires in ${minutesLeft(action.expiresIn ?? 0)}).`,
 			);
-			console.error(
+			errLine(
 				kleur.dim(
 					"Sign in or sign up there, pick or create the organization, then approve.\n",
 				),
@@ -617,7 +618,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
 			) {
 				openBrowser(action.url, base);
 			}
-			console.error(
+			errLine(
 				kleur.dim("Waiting for approval… (Ctrl-C keeps the code; re-run to resume)"),
 			);
 		}

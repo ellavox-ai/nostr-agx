@@ -33,6 +33,7 @@ import {
 	maskKey,
 	notice,
 	ok,
+	outLine,
 	say,
 } from "../lib/output.js";
 import { configPath, credentialsPath } from "../lib/paths.js";
@@ -302,7 +303,7 @@ export function configListCommand(): void {
 }
 
 export function configPathCommand(): void {
-	console.log(configPath());
+	outLine(configPath());
 }
 
 export function assertConfigSubcommand(sub: string): void {

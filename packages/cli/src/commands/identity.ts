@@ -16,7 +16,7 @@ import {
 	saveIdentity,
 	toNsec,
 } from "../lib/identity.js";
-import { heading, info, json, kv, ok, say, warn } from "../lib/output.js";
+import { emitStdoutJson, heading, info, json, kv, ok, say, warn } from "../lib/output.js";
 import { identityPath } from "../lib/paths.js";
 import { toDisplayNpub, toHexPubkey } from "../lib/peer.js";
 import { signNonceEvent } from "../lib/proof.js";
@@ -119,8 +119,9 @@ export function identityExportCommand(options: IdentityOptions): void {
 			},
 		);
 	}
-	// Deliberately bypasses the output helpers: this is data, not a report, and
-	// must survive `--json` and a non-TTY pipe unchanged.
+	// The ONE print of a secret key, by command: it goes around the output helpers
+	// (and so the scrub) on purpose, because the key is what was asked for. It is data,
+	// not a report, and must survive `--json` and a non-TTY pipe unchanged.
 	console.log(
 		options.hex
 			? identity.secretKeyHex
@@ -159,10 +160,9 @@ export async function identitySignCommand(
 	const identity = loadIdentity(profileName);
 	const event = await signNonceEvent(identity.signer, nonce.trim());
 
-	// Deliberately bypasses the output helpers, for the same reason
-	// `identityExportCommand` does: this is data to be pasted or piped, and it
-	// must survive `--json` and a non-TTY pipe byte for byte.
-	console.log(JSON.stringify(event));
+	// Data to be pasted or piped, so it survives `--json` and a non-TTY pipe, but
+	// not unscrubbed: the event is built from a nonce somebody else sent.
+	emitStdoutJson(event);
 }
 
 export function identityAllowCommand(

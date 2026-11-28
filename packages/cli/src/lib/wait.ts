@@ -1,7 +1,7 @@
 import kleur from "kleur";
 import type { ActionRequired } from "./errors.js";
 import { usageError } from "./errors.js";
-import { emitStderrJson, isJsonMode } from "./output.js";
+import { emitStderrJson, errLine, isJsonMode } from "./output.js";
 
 /**
  * Shared pieces of the `--wait` loops (`listing publish --wait`,
@@ -47,7 +47,7 @@ export function announceActionRequired(
 		emitStderrJson({ actionRequired: action });
 		return;
 	}
-	console.error(`\n${kleur.yellow("!")} ${message}`);
-	console.error(`\n  ${kleur.bold(action.url)}\n`);
-	console.error(kleur.dim("  Waiting… (Ctrl-C to stop; re-run to check again)"));
+	errLine(`\n${kleur.yellow("!")} ${message}`);
+	errLine(`\n  ${kleur.bold(action.url)}\n`);
+	errLine(kleur.dim("  Waiting… (Ctrl-C to stop; re-run to check again)"));
 }
