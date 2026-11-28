@@ -1,7 +1,11 @@
 import kleur from "kleur";
+import { scrubbedJson, scrubOutput } from "./scrub.js";
 
 /** Terminal output helpers. Every line the CLI prints goes through here so the
- * `--json` mode has exactly one place to suppress human formatting. */
+ * `--json` mode has exactly one place to suppress human formatting, and so a
+ * secret key that reaches any of them is replaced before it is written
+ * (`scrub.ts`). The one deliberate print of a key, `agx identity export`, does not
+ * pass through here. */
 
 let jsonMode = false;
 
@@ -19,8 +23,28 @@ export function setColor(enabled: boolean): void {
 
 export function say(message = ""): void {
 	if (!jsonMode) {
-		console.log(message);
+		console.log(scrubOutput(message));
 	}
+}
+
+/** One line on stdout, `--json` or not: for the few lines that are data, not a report. */
+export function outLine(message = ""): void {
+	console.log(scrubOutput(message));
+}
+
+/** One line on stderr, `--json` or not. */
+export function errLine(message = ""): void {
+	console.error(scrubOutput(message));
+}
+
+/** Text to stdout as given, with no newline added: what commander's own writer does (help, version). */
+export function writeOut(text: string): void {
+	process.stdout.write(scrubOutput(text));
+}
+
+/** Text to stderr as given, with no newline added: what commander's own writer does (usage errors). */
+export function writeErr(text: string): void {
+	process.stderr.write(scrubOutput(text));
 }
 
 export function ok(message: string): void {
@@ -45,19 +69,19 @@ export function fail(message: string): void {
  * security warnings and "what just happened" notes a harness should log.
  */
 export function notice(message: string): void {
-	console.error(`${kleur.yellow("!")} ${message}`);
+	errLine(`${kleur.yellow("!")} ${message}`);
 }
 
 /** One compact JSON object on one stderr line, `--json` or not. Used for the
  * blocking `agx login --json` hand-off, where stdout is reserved for the
  * final result. */
 export function emitStderrJson(payload: unknown): void {
-	console.error(JSON.stringify(payload));
+	console.error(scrubbedJson(payload));
 }
 
 /** One compact JSON object on one stdout line. */
 export function emitStdoutJson(payload: unknown): void {
-	console.log(JSON.stringify(payload));
+	console.log(scrubbedJson(payload));
 }
 
 export function step(n: number, total: number, message: string): void {
@@ -93,7 +117,7 @@ export function json(payload: unknown): void {
 		// These characters can only sit inside a JSON string, where `\uXXXX` parses
 		// back to the same value, so escaping the whole text loses nothing. Peer
 		// text can carry them, and a terminal may act on U+009B (CSI).
-		console.log(escapeLineBreakers(JSON.stringify(payload, null, 2)));
+		console.log(escapeLineBreakers(scrubbedJson(payload, 2)));
 	}
 }
 

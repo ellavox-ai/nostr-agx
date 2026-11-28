@@ -48,6 +48,7 @@ export {
 	publishToRelays,
 } from "./relay-pool";
 export * from "./relay-proxy";
+export * from "./secret-key-text";
 export * from "./signer";
 export {
 	assertPublicHttpsUrl,

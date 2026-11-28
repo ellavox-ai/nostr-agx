@@ -69,9 +69,12 @@ import { whoamiCommand } from "./commands/whoami.js";
 import { AgxCliError, EXIT, HumanActionRequiredError } from "./lib/errors.js";
 import {
 	emitStdoutJson,
+	errLine,
 	isJsonMode,
 	setColor,
 	setJsonMode,
+	writeErr,
+	writeOut,
 } from "./lib/output.js";
 import { holdsSecretKey, redactSecrets } from "./lib/secrets.js";
 import { AGX_CLI_VERSION } from "./lib/version.js";
@@ -110,6 +113,9 @@ export function buildProgram(): Command {
 	// not come back: the message is replaced, not edited, so no part of it survives.
 	// Set before any subcommand exists: subcommands copy it when created.
 	program.configureOutput({
+		// Help, the version and the parser's own errors are written by commander: through the scrubbing writers, like every other line.
+		writeOut,
+		writeErr,
 		outputError: (text, write) => write(holdsSecretKey(text) ? PARSER_ERROR_WITH_SECRET_KEY : text),
 	});
 
@@ -808,30 +814,30 @@ export function reportCliError(error: unknown): number {
 			return error.exitCode;
 		}
 		const action = error.actionRequired;
-		console.error(`\n${kleur.yellow("!")} ${error.message}`);
-		console.error(`\n  ${kleur.bold(action.url)}`);
+		errLine(`\n${kleur.yellow("!")} ${error.message}`);
+		errLine(`\n  ${kleur.bold(action.url)}`);
 		if (action.userCode) {
-			console.error(`  code ${kleur.bold(action.userCode)}`);
+			errLine(`  code ${kleur.bold(action.userCode)}`);
 		}
 		if (error.remediation) {
-			console.error(kleur.dim(`\n  ${error.remediation}\n`));
+			errLine(kleur.dim(`\n  ${error.remediation}\n`));
 		}
 		return error.exitCode;
 	}
 	// Every error line passes through redactSecrets: no key agx has sent may be
 	// printed, whatever wrote the message.
 	if (error instanceof AgxCliError) {
-		console.error(`\n${kleur.red("✗")} ${redactSecrets(error.message)}`);
+		errLine(`\n${kleur.red("✗")} ${redactSecrets(error.message)}`);
 		if (error.remediation) {
-			console.error(kleur.dim(`\n  ${redactSecrets(error.remediation)}\n`));
+			errLine(kleur.dim(`\n  ${redactSecrets(error.remediation)}\n`));
 		}
 		return error.exitCode;
 	}
-	console.error(
+	errLine(
 		`\n${kleur.red("✗")} ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
 	);
 	if (process.env.AGX_DEBUG && error instanceof Error && error.stack) {
-		console.error(redactSecrets(error.stack));
+		errLine(redactSecrets(error.stack));
 	}
 	return EXIT.generic;
 }
